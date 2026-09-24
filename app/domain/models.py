@@ -309,6 +309,7 @@ class SearchTrace(BaseModel):
 
 class ArtifactPersonLink(BaseModel):
     person_id: str
+    person_name: str = ""
     artifact_id: str
     relationship: Literal["author", "speaker", "contributor", "interviewee", "mentioned_person"]
 

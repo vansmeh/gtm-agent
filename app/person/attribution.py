@@ -177,6 +177,7 @@ def build_artifacts(
             links.append(
                 ArtifactPersonLink(
                     person_id=linked.person_id,
+                    person_name=linked.name,
                     artifact_id=artifact_id,
                     relationship=relationship,  # type: ignore[arg-type]
                 )

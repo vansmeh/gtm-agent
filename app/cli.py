@@ -130,13 +130,22 @@ def render_live_report(run: RunModel) -> str:
     lines[artifact_at:artifact_at] = artifact_lines or ["- none"]
     chain = ["ATTRIBUTION CHAIN:"]
     by_artifact = {item.id or item.evidence_id: item for item in run.artifacts}
+    people_by_name = {person.name: person for person in run.people}
     for link in run.artifact_links:
         artifact = by_artifact.get(link.artifact_id)
         if artifact is None:
             continue
+        person = people_by_name.get(link.person_name)
+        opportunity = next((row for row in run.person_opportunities if row.person_name == link.person_name), None)
+        query = next((trace.query for trace in run.search_traces if trace.result_url == artifact.url), "")
+        role = person.title if person is not None and person.title else "unknown"
+        function = person.function_level if person is not None else "unknown"
+        ownership = person.ownership_level if person is not None else "unknown"
+        tier = opportunity.opportunity_tier if opportunity is not None else "TIER_D_INSUFFICIENT"
         chain.append(
-            f"RESULT {artifact.url} → ARTIFACT {artifact.kind} → PERSON {artifact.author or link.person_id} "
-            f"({link.relationship}) → TOPIC {artifact.topic}"
+            f"QUERY {query or '-'} → RESULT {artifact.url} → ARTIFACT {artifact.kind} "
+            f"→ PERSON {link.person_name or artifact.author} ({link.relationship}) "
+            f"→ CURRENT ROLE {role} → FUNCTION {function} → OWNERSHIP {ownership} → OPPORTUNITY TIER {tier}"
         )
     lines[artifact_at + len(artifact_lines or ["- none"]) : artifact_at + len(artifact_lines or ["- none"])] = (
         chain or ["ATTRIBUTION CHAIN:", "none"]
