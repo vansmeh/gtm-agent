@@ -341,6 +341,9 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             if identity.contradictions:
                 reason = "contradictory identity"
                 decision = "reject"
+            elif record.validity == "stale":
+                reason = "role evidence is older than the freshness window"
+                decision = "reject"
             elif status == "unknown":
                 reason = "responsibility not supported after verification"
                 decision = "reject"
@@ -376,6 +379,9 @@ def _attach_ownership_window(run: RunModel, name: str) -> None:
             continue
         window = " ".join(text[idx : idx + 700].split())
         if "teams are building" not in window.lower():
+            continue
+        owner_at = window.lower().find("teams are building")
+        if re.search(r"\b[A-Z][a-z]+ [A-Z][a-z]+,", window[len(name) : owner_at]):
             continue
         topics, supports, contradicts, gap = classify_sentence(window)
         if not topics:

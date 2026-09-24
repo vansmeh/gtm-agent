@@ -65,11 +65,12 @@ def identities_from_mentions(mentions: list[Mention], company: str, *, observed_
         urls = list(dict.fromkeys(row.url for row in rows))
         dates = [row.published_at for row in rows if row.published_at is not None]
         contradictions: list[str] = []
-        if len(titles) > 1:
+        distinct = list(dict.fromkeys(_norm_title(item) for item in titles))
+        if len(distinct) > 1:
             contradictions.append("Conflicting public titles: " + " vs ".join(titles) + ".")
-        title = _newest_title(rows) if len(titles) == 1 else titles[0]
+        title = _newest_title(rows) if len(distinct) == 1 else titles[0]
         excerpt = _excerpt_for_title(rows, title)
-        confidence = _confidence(urls, titles, excerpt)
+        confidence = _confidence(urls, distinct, excerpt)
         first_seen = min(dates) if dates else None
         last_seen = max(dates) if dates else None
         role_dates = [row.published_at for row in rows if row.title == title and row.published_at is not None]
@@ -114,6 +115,13 @@ def _excerpt_for_title(rows: list[Mention], title: str) -> str:
         if row.title == title and row.excerpt:
             return row.excerpt
     return rows[0].excerpt if rows else ""
+
+
+def _norm_title(title: str) -> str:
+    words = title.lower().replace(",", " ").split()
+    if words and words[-1].endswith("s") and not words[-1].endswith("ss"):
+        words[-1] = words[-1][:-1]
+    return " ".join(words)
 
 
 def _confidence(urls: list[str], titles: list[str], excerpt: str) -> float:
