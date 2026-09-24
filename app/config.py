@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     max_pages_per_run: int = 8
     person_page_budget: int = 6
     person_query_budget: int = 10
+    discovery_query_budget: int = 10
+    discovery_page_budget: int = 4
+    verification_query_budget: int = 6
+    verification_page_budget: int = 3
+    deep_query_budget: int = 10
+    deep_page_budget: int = 6
     why_now_window_days: int = 180
     current_role_window_days: int = 365
     current_activity_window_days: int = 365

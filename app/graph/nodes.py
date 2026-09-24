@@ -27,14 +27,11 @@ from app.opportunity.person_opportunity import (
     assign_threads,
     build_opportunities,
     c_suite_without_specialist_role,
-    current_role_queries,
     decide_channel,
     decide_contact,
-    footprint_queries,
     hypotheses_for,
     hypothesis_queries,
     research_gap,
-    trigger_queries,
 )
 from app.opportunity.redis_mapper import map_opportunities
 from app.opportunity.why_now import detect_why_now
@@ -44,11 +41,18 @@ from app.person.artifact_discovery import (
     candidate_class,
     converge_ownership,
     currentness_for,
-    person_artifact_queries,
     team_follow_up_queries,
     teams_in_text,
 )
 from app.person.discovery import discover_mentions
+from app.person.enrichment import (
+    CandidateView,
+    cheap_reject,
+    deep_research_queries,
+    next_owner_query,
+    prioritize,
+    profile_queries,
+)
 from app.person.freshness import ACCOUNT_TRIGGER_DAYS, resolve_freshness
 from app.person.identity import identities_from_mentions, validity_for
 from app.person.ownership import affected_functions, classify_ownership, job_function_evidence
@@ -85,6 +89,12 @@ class PipelineDeps:
     observed_at: datetime
     max_searches_per_cycle: int = 4
     person_query_budget: int = 6
+    discovery_query_budget: int = 10
+    discovery_page_budget: int = 4
+    verification_query_budget: int = 6
+    verification_page_budget: int = 3
+    deep_query_budget: int = 10
+    deep_page_budget: int = 6
     search_provider_name: str = "mock"
 
 
@@ -115,20 +125,28 @@ def _ingest_page(
     url: str,
     published_hint: str | None = None,
     *,
-    person_slot: bool = False,
+    person_slot: str | bool = False,
 ) -> None:
     from datetime import date
 
     if url in run.fetched_urls:
         return
-    if person_slot:
-        if run.person_pages_used >= run.person_page_budget:
-            return
-    elif len(run.fetched_urls) >= run.max_pages:
+    if person_slot == "discovery" and run.discovery_pages_used >= run.discovery_page_budget:
+        return
+    if person_slot == "verification" and run.verification_pages_used >= run.verification_page_budget:
+        return
+    if person_slot == "deep" and run.deep_pages_used >= run.deep_page_budget:
+        return
+    if person_slot is False and len(run.fetched_urls) >= run.max_pages:
         return
     page = deps.fetcher.fetch(url)
     run.fetched_urls.append(url)
-    if person_slot:
+    if person_slot == "discovery":
+        run.discovery_pages_used += 1
+    elif person_slot == "verification":
+        run.verification_pages_used += 1
+    elif person_slot == "deep":
+        run.deep_pages_used += 1
         run.person_pages_used += 1
     if page.status != "ok":
         _log(run, "fetch", f"Skipped {url}: {page.status} {page.error}")
@@ -225,16 +243,25 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
         function_label = run.functions[0].label if run.functions else ""
         signal_label = " ".join(item.label for item in run.signals[:2]) or "technical"
         run.affected_functions = affected_functions(signal_label) if run.signals else []
+        run.discovery_query_budget = deps.discovery_query_budget
+        run.discovery_page_budget = deps.discovery_page_budget
+        run.verification_query_budget = deps.verification_query_budget
+        run.verification_page_budget = deps.verification_page_budget
+        run.deep_query_budget = deps.deep_query_budget
+        run.deep_page_budget = deps.deep_page_budget
         queries = (
             person_discovery_queries(run.account_name, run.domain, function_label, signal_label)
             + hypothesis_queries(run.account_name, run.person_hypotheses)
-        )[: deps.person_query_budget]
+        )[: deps.discovery_query_budget]
         if run.signals:
             queries = artifact_queries(run.account_name, run.domain, signal_label)[:6] + queries
         collected: list[tuple[int, str, str | None]] = []
         seen_hits: set[str] = set()
         for query in queries:
+            if run.discovery_queries_used >= run.discovery_query_budget and not run.signals:
+                break
             hits = deps.search.search(query, limit=4)
+            run.discovery_queries_used += 1
             _note_search(run, query, hits)
             _record_snippet_leads(run, hits, query)
             _log(run, "people", f"Person discovery query {query!r} returned {len(hits)} hits.")
@@ -252,84 +279,13 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 seen_hits.add(hit.url)
                 collected.append((source_rank(hit.url, run.domain), hit.url, hit.published_at))
         collected.sort(key=lambda item: item[0])
-        discovery_page_cap = max(1, run.person_page_budget - 2)
         for _rank, url, published in collected:
-            if run.person_pages_used >= discovery_page_cap:
+            if run.discovery_pages_used >= run.discovery_page_budget:
                 break
-            _ingest_page(run, deps, url, published, person_slot=True)
+            _ingest_page(run, deps, url, published, person_slot="discovery")
         observed_on = run.observed_at.date()
         mentions = discover_mentions(run.observations, run.account_name)
-        _verify_snippet_leads(run, deps, mentions)
-        mentions = discover_mentions(run.observations, run.account_name)
         topic = signal_label or "architecture"
-        followed = 0
-        for mention in mentions:
-            if c_suite_without_specialist_role(mention.title):
-                run.person_traces.append(
-                    PersonSearchTrace(
-                        query="",
-                        candidate=mention.name,
-                        source=mention.url,
-                        finding=mention.title,
-                        decision="reject",
-                        reason="C-suite title without a specialist role or ownership evidence",
-                    )
-                )
-                continue
-            if followed >= 2 or run.person_pages_used >= run.person_page_budget:
-                run.person_traces.append(
-                    PersonSearchTrace(
-                        query="",
-                        candidate=mention.name,
-                        source=mention.url,
-                        finding=mention.title,
-                        decision="reject",
-                        reason="person search budget exhausted before footprint research",
-                    )
-                )
-                continue
-            stages = (
-                current_role_queries(mention.name, run.account_name, run.domain, mention.title)[:2]
-                + person_artifact_queries(mention.name, run.account_name, topic)[:1]
-                + footprint_queries(mention.name, run.account_name, topic)[:1]
-                + trigger_queries(mention.name, run.account_name)[:1]
-            )
-            fetched_followups = 0
-            for index, query in enumerate(stages):
-                follow = deps.search.search(query, limit=4)
-                _note_search(run, query, follow)
-                run.person_traces.append(
-                    PersonSearchTrace(
-                        query=query,
-                        candidate=mention.name,
-                        source=mention.url,
-                        finding=f"{len(follow)} follow-up hits",
-                        decision="accept" if follow else "reject",
-                        reason="checking technical footprint and a person-specific trigger",
-                    )
-                )
-                # The first footprint query and the first trigger query may fetch.
-                # Later queries are stored. Extra pages stay inside the person budget.
-                if run.person_pages_used >= run.person_page_budget or fetched_followups >= 4:
-                    continue
-                fresh = [hit for hit in follow if hit.url not in run.fetched_urls]
-                take = 1 if index < 2 else 2
-                for hit in fresh[:take]:
-                    if run.person_pages_used >= run.person_page_budget or fetched_followups >= 4:
-                        break
-                    _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
-                    fetched_followups += 1
-            followed += 1
-        mentions = discover_mentions(run.observations, run.account_name)
-        if mentions:
-            lead = mentions[0].name
-            check_query = f"{lead} {run.account_name} former OR previously"
-            check = deps.search.search(check_query, limit=3)
-            _note_search(run, check_query, check)
-            _log(run, "people", f"Contradiction check for {lead} returned {len(check)} hits.")
-            for hit in check[:1]:
-                _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
-            mentions = discover_mentions(run.observations, run.account_name)
         if run.signals:
             team_names = list(
                 dict.fromkeys(
@@ -348,7 +304,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     for hit in hits:
                         if fetched_team >= 1 or not is_allowed_public_url(hit.url) or hit.url in run.fetched_urls:
                             continue
-                        _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
+                        _ingest_page(run, deps, hit.url, hit.published_at, person_slot="discovery")
                         fetched_team += 1
             mentions = discover_mentions(run.observations, run.account_name)
         if not run.affected_functions:
@@ -370,9 +326,127 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                         continue
                     if hit.url in run.fetched_urls:
                         continue
-                    _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
+                    _ingest_page(run, deps, hit.url, hit.published_at, person_slot="discovery")
                     fetched_functions += 1
             mentions = discover_mentions(run.observations, run.account_name)
+        per_function = 10
+        cap = per_function * max(1, len(run.affected_functions))
+        views = [
+            CandidateView(
+                name=mention.name,
+                title=mention.title,
+                company=run.account_name,
+                url=mention.url,
+                excerpt=mention.excerpt,
+                published_at=mention.published_at,
+            )
+            for mention in mentions[:cap]
+        ]
+        kept: list[CandidateView] = []
+        for view in views:
+            reason = cheap_reject(
+                view,
+                account_name=run.account_name,
+                functions=run.affected_functions,
+                observed_on=observed_on,
+            )
+            if c_suite_without_specialist_role(view.title):
+                reason = "C-suite title without a specialist role or ownership evidence"
+            if reason:
+                view.reject_reason = reason
+                run.person_traces.append(
+                    PersonSearchTrace(
+                        query="",
+                        candidate=view.name,
+                        source=view.url,
+                        finding=view.title,
+                        decision="reject",
+                        reason=reason,
+                    )
+                )
+                continue
+            kept.append(view)
+        prioritized = prioritize(
+            kept, functions=run.affected_functions, observed_on=observed_on
+        )
+        run.candidates_discovered = len(views)
+        run.candidates_rejected = len(views) - len(kept)
+        run.candidates_prioritized = len(prioritized)
+        deep_names = [item.name for item in prioritized[:5]]
+        _verify_snippet_leads(run, deps, mentions, only=set(deep_names))
+        for view in prioritized[:5]:
+            if run.verification_queries_used >= run.verification_query_budget:
+                break
+            for query in profile_queries(view.name, run.account_name, run.affected_functions)[:2]:
+                if run.verification_queries_used >= run.verification_query_budget:
+                    break
+                hits = deps.search.search(query, limit=3)
+                run.verification_queries_used += 1
+                _note_search(run, query, hits)
+                run.person_traces.append(
+                    PersonSearchTrace(
+                        query=query,
+                        candidate=view.name,
+                        source=view.url,
+                        finding=f"{len(hits)} current-profile hits",
+                        decision="accept" if hits else "reject",
+                        reason="public current-profile discovery; LinkedIn pages are not fetched",
+                    )
+                )
+                for hit in hits:
+                    if "linkedin.com" in hit.url or not is_allowed_public_url(hit.url):
+                        continue
+                    if run.verification_pages_used >= run.verification_page_budget:
+                        break
+                    _ingest_page(run, deps, hit.url, hit.published_at, person_slot="verification")
+        for view in prioritized[:5]:
+            if run.deep_queries_used >= run.deep_query_budget:
+                run.person_traces.append(
+                    PersonSearchTrace(
+                        query="",
+                        candidate=view.name,
+                        source=view.url,
+                        finding=view.title,
+                        decision="reject",
+                        reason="deep-person budget exhausted after higher-priority candidates",
+                    )
+                )
+                continue
+            view.priority_reason = view.priority_reason
+            for query in deep_research_queries(view.name, run.account_name, topic):
+                if run.deep_queries_used >= run.deep_query_budget:
+                    break
+                follow = deps.search.search(query, limit=4)
+                run.deep_queries_used += 1
+                _note_search(run, query, follow)
+                run.person_traces.append(
+                    PersonSearchTrace(
+                        query=query,
+                        candidate=view.name,
+                        source=view.url,
+                        finding=f"{len(follow)} deep-research hits",
+                        decision="accept" if follow else "reject",
+                        reason=view.priority_reason or "deep research for a prioritized candidate",
+                    )
+                )
+                for hit in follow:
+                    if not is_allowed_public_url(hit.url) or run.deep_pages_used >= run.deep_page_budget:
+                        continue
+                    _ingest_page(run, deps, hit.url, hit.published_at, person_slot="deep")
+            run.deep_researched_count += 1
+        if deep_names:
+            lead = deep_names[0]
+            check_query = f"{lead} {run.account_name} former OR previously"
+            if run.verification_queries_used < run.verification_query_budget:
+                check = deps.search.search(check_query, limit=3)
+                run.verification_queries_used += 1
+                _note_search(run, check_query, check)
+                for hit in check[:1]:
+                    if is_allowed_public_url(hit.url):
+                        _ingest_page(run, deps, hit.url, hit.published_at, person_slot="verification")
+        mentions = discover_mentions(run.observations, run.account_name)
+        priority_by_name = {item.name: item.priority_reason for item in prioritized}
+        researched = set(deep_names[: run.deep_researched_count])
         people: list[PersonRecord] = []
         for identity in identities_from_mentions(mentions, run.account_name, observed_on=observed_on):
             _attach_ownership_window(run, identity.name)
@@ -441,6 +515,12 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 text=identity.excerpt,
                 observed_on=observed_on,
             )
+            record.candidate_priority_reason = priority_by_name.get(identity.name, "")
+            record.deep_researched = identity.name in researched
+            if record.deep_researched and record.ownership_level not in {"explicit", "strong"}:
+                function = run.affected_functions[0] if run.affected_functions else "platform"
+                problem = run.signals[0].label if run.signals else "the affected system"
+                record.next_query = next_owner_query(run.account_name, function, identity.name, problem)
             if identity.contradictions:
                 reason = "contradictory identity"
                 decision = "reject"
@@ -583,12 +663,19 @@ def _record_snippet_leads(run: RunModel, hits: Sequence[object], query: str) -> 
         )
 
 
-def _verify_snippet_leads(run: RunModel, deps: PipelineDeps, mentions: Sequence[object]) -> None:
+def _verify_snippet_leads(
+    run: RunModel,
+    deps: PipelineDeps,
+    mentions: Sequence[object],
+    only: set[str] | None = None,
+) -> None:
     known = {getattr(mention, "name", "") for mention in mentions}
     for lead in run.snippet_leads:
         if lead.name in known:
             continue
-        if run.person_pages_used >= run.person_page_budget:
+        if only is not None and lead.name not in only:
+            continue
+        if run.verification_pages_used >= run.verification_page_budget:
             run.person_traces.append(
                 PersonSearchTrace(
                     query=lead.query,
@@ -596,24 +683,27 @@ def _verify_snippet_leads(run: RunModel, deps: PipelineDeps, mentions: Sequence[
                     source=lead.url,
                     finding=lead.title,
                     decision="reject",
-                    reason="snippet candidate was not fetched from an independent source before the page budget ended",
+                    reason="snippet candidate was not fetched before the verification budget ended",
                 )
             )
             continue
         query = f'"{lead.name}" {run.account_name}'
+        if run.verification_queries_used >= run.verification_query_budget:
+            continue
         hits = deps.search.search(query, limit=3)
+        run.verification_queries_used += 1
         _note_search(run, query, hits)
-        if lead.url not in run.fetched_urls and run.person_pages_used < run.person_page_budget:
-            _ingest_page(run, deps, lead.url, None, person_slot=True)
+        if lead.url not in run.fetched_urls and is_allowed_public_url(lead.url):
+            _ingest_page(run, deps, lead.url, None, person_slot="verification")
         fresh = [
             hit
             for hit in hits
             if hit.url not in run.fetched_urls and hit.url != lead.url and is_allowed_public_url(hit.url)
         ]
         for hit in fresh[:1]:
-            if run.person_pages_used >= run.person_page_budget:
+            if run.verification_pages_used >= run.verification_page_budget:
                 break
-            _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
+            _ingest_page(run, deps, hit.url, hit.published_at, person_slot="verification")
         run.person_traces.append(
             PersonSearchTrace(
                 query=query,
@@ -926,6 +1016,14 @@ def recommend(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
         }
         run.function_evidence_ids = [item.id for item in job_function_evidence(run.evidence)]
         owner_levels = {"explicit", "strong"}
+        close = next(
+            (
+                person
+                for person in run.people
+                if person.deep_researched and person.ownership_level not in owner_levels
+            ),
+            None,
+        )
         missing, question = research_gap(
             account_name=run.account_name,
             problem=problem.label if problem else "",
@@ -933,6 +1031,7 @@ def recommend(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             has_trigger=any(row.why_now_credible for row in run.person_opportunities),
             has_hypothesis=account_hypothesis or any(row.redis_credible for row in run.person_opportunities),
             functions=run.affected_functions,
+            candidate_name="" if close is None else close.name,
         )
         run.research_missing = missing
         run.next_research_question = question

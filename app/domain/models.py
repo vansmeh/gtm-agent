@@ -115,6 +115,9 @@ class PersonRecord(BaseModel):
         "technical_owner", "technical_influencer", "manager", "executive", "unknown"
     ] = "unknown"
     currentness: Literal["current", "recently_changed", "historical", "unknown"] = "unknown"
+    candidate_priority_reason: str = ""
+    deep_researched: bool = False
+    next_query: str = ""
     historical_expertise: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
     source_urls: list[str]
@@ -328,6 +331,22 @@ class RunModel(BaseModel):
     max_cycles: int = 3
     max_pages: int = 8
     person_page_budget: int = 6
+    discovery_query_budget: int = 10
+    discovery_page_budget: int = 4
+    verification_query_budget: int = 6
+    verification_page_budget: int = 3
+    deep_query_budget: int = 10
+    deep_page_budget: int = 6
+    discovery_queries_used: int = 0
+    discovery_pages_used: int = 0
+    verification_queries_used: int = 0
+    verification_pages_used: int = 0
+    deep_queries_used: int = 0
+    deep_pages_used: int = 0
+    candidates_discovered: int = 0
+    candidates_rejected: int = 0
+    candidates_prioritized: int = 0
+    deep_researched_count: int = 0
     queries_executed: int = 0
     results_examined: int = 0
     search_log: list[SearchExecution] = Field(default_factory=list)

@@ -141,6 +141,7 @@ def research_gap(
     has_trigger: bool,
     has_hypothesis: bool,
     functions: list[str] | None = None,
+    candidate_name: str = "",
 ) -> tuple[list[str], str]:
     missing: list[str] = []
     function = (functions or ["Platform"])[0].title()
@@ -155,9 +156,13 @@ def research_gap(
     if not missing:
         return [], ""
     focus = problem or "the affected system"
-    question = (
-        f"Find current {account_name} {function} leadership and verify ownership of {focus}."
-    )
+    if candidate_name and not has_owner:
+        question = (
+            f"Find current {account_name} {function} team ownership and verify whether "
+            f"{candidate_name} leads {focus}."
+        )
+    else:
+        question = f"Find current {account_name} {function} leadership and verify ownership of {focus}."
     return missing, question
 
 

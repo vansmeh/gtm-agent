@@ -63,6 +63,12 @@ def execute_run(
         max_cycles=settings.max_research_cycles,
         max_pages=settings.max_pages_per_run,
         person_page_budget=settings.person_page_budget,
+        discovery_query_budget=settings.discovery_query_budget,
+        discovery_page_budget=settings.discovery_page_budget,
+        verification_query_budget=settings.verification_query_budget,
+        verification_page_budget=settings.verification_page_budget,
+        deep_query_budget=settings.deep_query_budget,
+        deep_page_budget=settings.deep_page_budget,
     )
     store = Store(session)
     store.create_account(account_id, account_name, domain, moment)

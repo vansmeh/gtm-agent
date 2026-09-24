@@ -74,10 +74,14 @@ def render_live_report(run: RunModel) -> str:
         "QUERIES:",
         "PERSON-SPECIFIC EVIDENCE:",
         "PERSON SEARCH TRACE:",
-        "CANDIDATES DISCOVERED: "
-        + str(len({trace.candidate for trace in run.person_traces if trace.candidate}) or len(run.people)),
-        "CANDIDATES REJECTED: "
-        + str(len([trace for trace in run.person_traces if trace.decision == "reject" and trace.candidate])),
+        f"CANDIDATES DISCOVERED: {run.candidates_discovered or len(run.people)}",
+        f"CANDIDATES REJECTED: {run.candidates_rejected}",
+        f"CANDIDATES PRIORITIZED: {run.candidates_prioritized}",
+        f"DEEP-RESEARCHED: {run.deep_researched_count}",
+        "CURRENT OWNERS VERIFIED: "
+        + str(len([person for person in run.people if person.ownership_level in {"explicit", "strong"}])),
+        "ACTIONABLE OPPORTUNITIES: "
+        + str(len([row for row in run.person_opportunities if row.decision == "contact_now"])),
         *[
             f"- {trace.candidate}: {trace.reason}"
             for trace in run.person_traces
@@ -114,14 +118,14 @@ def render_live_report(run: RunModel) -> str:
                     f"NAME: {person.name}",
                     f"CURRENT ROLE: {person.title or 'unknown'}",
                     f"CURRENTNESS: {person.currentness}",
-                    f"CANDIDATE CLASS: {person.candidate_class}",
-                    "TECHNICAL EXPERTISE: " + (", ".join(person.historical_expertise) or "none"),
-                    f"CURRENT FUNCTION: {person.function_guess or 'unknown'}",
+                    f"FUNCTION: {person.function_guess or 'unknown'}",
+                    "TECHNICAL FOOTPRINT: " + (", ".join(person.footprint_topics) or "none"),
                     f"OWNERSHIP LEVEL: {person.ownership_level}",
                     "OWNERSHIP EVIDENCE: " + (", ".join(person.ownership_evidence_ids) or "none"),
-                    "TECHNICAL EVIDENCE: " + (", ".join(person.footprint_topics) or "none"),
-                    f"PERSON/PROBLEM FIT: {_fit_line(person)}",
+                    f"PRIORITY: {person.candidate_priority_reason or 'not prioritized'}",
                     f"WHY NOW: {person.current_ownership or 'unknown'}",
+                    f"DECISION: {'deep-researched' if person.deep_researched else 'not deep-researched'}",
+                    f"NEXT: {person.next_query or 'none'}",
                 ]
             )
         )
