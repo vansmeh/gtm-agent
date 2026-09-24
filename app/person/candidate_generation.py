@@ -3,6 +3,7 @@
 import re
 from dataclasses import dataclass
 
+from app.person.entity import classify_entity
 from app.research.search import SearchHit
 
 _NAME = r"([A-Z][a-z]{2,}(?: [A-Z][a-z]{2,}){1,2})"
@@ -341,7 +342,7 @@ def extract_names(
                 rejected += 1
             continue
         for name, title, kind in found:
-            reason = _reject_name(name, hit.url, kind, account)
+            reason = _reject_name(name, hit.url, kind, account, text)
             if reason:
                 rejected += 1
                 continue
@@ -414,7 +415,7 @@ def _nearby_title(text: str, name: str) -> str:
     return ""
 
 
-def _reject_name(name: str, url: str, kind: str, account: str) -> str:
+def _reject_name(name: str, url: str, kind: str, account: str, context: str = "") -> str:
     parts = name.split()
     lowered = [part.lower() for part in parts]
     if len(set(lowered)) < 2:
@@ -425,6 +426,10 @@ def _reject_name(name: str, url: str, kind: str, account: str) -> str:
         return "github username without attribution"
     if not any(part[:1].isupper() for part in parts):
         return "not a person name"
+    marker = context if kind in {"byline", "speaker", "role"} else context
+    entity = classify_entity(name, marker if kind != "bare" else context)
+    if entity != "PERSON":
+        return f"not a person ({entity})"
     return ""
 
 

@@ -30,6 +30,7 @@ from app.opportunity.person_opportunity import (
     c_suite_without_specialist_role,
     decide_channel,
     decide_contact,
+    exploratory_message,
     hypotheses_for,
     hypothesis_queries,
     research_gap,
@@ -1040,9 +1041,19 @@ def laya_node(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 None,
             )
             run.laya.strongest_person_opportunity_id = None if primary is None else primary.id
+            policy = next(
+                (row for row in run.person_opportunities if row.decision == "contact_now"),
+                next((row for row in run.person_opportunities if row.decision == "human_review"), primary),
+            )
+            run.laya.opportunity_tier = "" if policy is None else policy.opportunity_tier
+            run.laya.outreach_eligibility = "research_more" if policy is None else policy.decision
             run.laya.contact_decision = "research_more"
+            run.laya.channel = None if policy is None else policy.recommended_channel
             run.laya.thread_role = "none" if primary is None else primary.thread_role
-            run.laya.notes.append("Shadow Laya is not trained for Redis GTM and does not emit contact_now.")
+            run.laya.notes.append(
+                "Untrained Laya predicts tier and channel but does not override the evidence policy."
+            )
+            run.laya.next_step = "research_more"
         _log(
             run,
             "laya",
@@ -1114,9 +1125,23 @@ def recommend(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             disposition = "ignore"
         elif primary is not None and primary.relevance == "not_relevant" and not run.people:
             disposition = "ignore"
+        review_row = next((row for row in run.person_opportunities if row.decision == "human_review"), None)
         draft = None
         channel = None
         template_id = None
+        if review_row is not None and disposition != "review_draft":
+            reviewed = next((item for item in run.people if item.id == review_row.person_id), None)
+            if reviewed is not None:
+                person = reviewed
+                disposition = "human_review"
+                channel = "email"
+                draft = exploratory_message(
+                    name=reviewed.name,
+                    role=reviewed.title or "unknown",
+                    account=run.account_name,
+                    problem=signal_text,
+                )
+                review_row.recommended_channel = "email"
         if person is not None and run.template_choice is not None and disposition == "review_draft":
             template = next(
                 item for item in deps.playbook.templates if item.id == run.template_choice.template_id
@@ -1154,6 +1179,8 @@ def recommend(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             "WHAT should I do next?": (
                 "Review the draft. Do not send it."
                 if disposition == "review_draft"
+                else "Human review of an exploratory note. Ownership is probable, not verified. Do not send it."
+                if disposition == "human_review"
                 else "Research more before preparing outreach."
                 if disposition == "research_more"
                 else "Ignore for now."

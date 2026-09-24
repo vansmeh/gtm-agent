@@ -193,7 +193,8 @@ def test_affiliation_without_ownership_is_research_more() -> None:
         why_now_credible=True,
         redis_credible=True,
     )
-    assert decide_contact(row, person) == "research_more"
+    assert decide_contact(row, person) == "human_review"
+    assert row.opportunity_tier == "TIER_B_PROBABLE_OWNER"
 
 
 def test_trigger_without_the_person_does_not_contact() -> None:

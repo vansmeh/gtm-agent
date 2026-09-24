@@ -13,8 +13,15 @@ RedisRelevance = Literal[
     "not_relevant",
 ]
 
-NextStep = Literal["contact_now", "research_more", "nurture", "ignore"]
-SystemDisposition = Literal["review_draft", "research_more", "nurture", "ignore"]
+NextStep = Literal["contact_now", "human_review", "research_more", "not_ready", "nurture", "ignore"]
+SystemDisposition = Literal["review_draft", "human_review", "research_more", "nurture", "ignore"]
+OpportunityTier = Literal[
+    "TIER_A_VERIFIED_OWNER",
+    "TIER_B_PROBABLE_OWNER",
+    "TIER_C_RELEVANT_PERSON",
+    "TIER_D_INSUFFICIENT",
+]
+OutreachEligibility = Literal["contact_now", "human_review", "research_more", "not_ready", "nurture", "ignore"]
 
 
 class Observation(BaseModel):
@@ -190,7 +197,9 @@ class LayaDecisionSet(BaseModel):
     owning_function: str | None
     most_relevant_person_id: str | None
     strongest_person_opportunity_id: str | None = None
-    contact_decision: Literal["contact_now", "research_more", "nurture", "ignore"] | None = None
+    contact_decision: OutreachEligibility | None = None
+    opportunity_tier: str = ""
+    outreach_eligibility: str = ""
     thread_role: Literal["primary_contact", "secondary_contact", "executive_thread", "none"] | None = None
     timing_strong_enough: bool
     next_step: NextStep
@@ -311,7 +320,10 @@ class PersonOpportunity(BaseModel):
     alternative_technologies: list[str] = Field(default_factory=list)
     contactability: Contactability = Field(default_factory=Contactability)
     recommended_channel: Literal["email", "linkedin", "call", "multi_channel", "none"] = "none"
-    decision: Literal["contact_now", "research_more", "nurture", "ignore"] = "research_more"
+    decision: OutreachEligibility = "research_more"
+    opportunity_tier: OpportunityTier = "TIER_D_INSUFFICIENT"
+    ownership_confidence: str = ""
+    tier_evidence: str = ""
     template_id: str | None = None
     action_id: str | None = None
     confidence: float = 0.0

@@ -118,7 +118,8 @@ def test_probable_owner_does_not_contact() -> None:
     assert level == "probable"
     person = _person(level)
     row = _row()
-    assert decide_contact(row, person) == "research_more"
+    assert decide_contact(row, person) == "human_review"
+    assert row.opportunity_tier == "TIER_B_PROBABLE_OWNER"
 
 
 def test_weak_title_only_never_qualifies() -> None:

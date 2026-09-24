@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from app.domain.models import Evidence, Observation
+from app.person.entity import classify_entity
 
 _TITLE = (
     r"(?:Head of|VP|Vice President(?: of)?|Director of|Chief|CEO|CTO|CIO|CPO|"
@@ -141,6 +142,8 @@ def _names_in(text: str) -> list[tuple[str, str]]:
             name = " ".join(part.capitalize() if part.islower() else part for part in match.group(1).split())
             parts = name.split()
             if any(part.lower() in _BLOCK for part in parts):
+                continue
+            if classify_entity(name, text) != "PERSON":
                 continue
             if len(parts) < 2:
                 continue

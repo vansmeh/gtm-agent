@@ -126,6 +126,7 @@ def render_live_report(run: RunModel) -> str:
     lines[artifact_at:artifact_at] = artifact_lines or ["- none"]
     candidate_at = lines.index("CURRENT CANDIDATES:") + 1
     candidate_lines = []
+    opportunity_by_person = {row.person_id: row for row in run.person_opportunities}
     for person in run.people:
         candidate_lines.append(
             "\n".join(
@@ -144,9 +145,16 @@ def render_live_report(run: RunModel) -> str:
                     f"TRIGGER → PERSON: {person.trigger_to_person or 'none'}",
                     f"OWNERSHIP LEVEL: {person.ownership_level}",
                     "OWNERSHIP EVIDENCE: " + (", ".join(person.ownership_evidence_ids) or "none"),
+                    f"OWNERSHIP CONFIDENCE: {person.ownership_level}",
                     f"CANDIDATE STATE: {person.candidate_state}",
                     f"PRIORITY: {person.candidate_priority_reason or 'not prioritized'}",
-                    f"WHY NOW: {person.current_ownership or 'unknown'}",
+                    f"TECHNICAL RELEVANCE: {person.function_level}",
+                    f"REDIS HYPOTHESIS: {_opportunity_field(opportunity_by_person.get(person.id), 'redis_hypothesis')}",
+                    f"WHY NOW: {_opportunity_field(opportunity_by_person.get(person.id), 'why_now')}",
+                    f"CONTACTABILITY: {_opportunity_field(opportunity_by_person.get(person.id), 'contact')}",
+                    f"OPPORTUNITY TIER: {_opportunity_field(opportunity_by_person.get(person.id), 'tier')}",
+                    f"TIER EVIDENCE: {_opportunity_field(opportunity_by_person.get(person.id), 'evidence')}",
+                    f"ACTIONABILITY: {_opportunity_field(opportunity_by_person.get(person.id), 'action')}",
                     f"DECISION: {'deep-researched' if person.deep_researched else 'not deep-researched'}",
                     f"NEXT: {person.next_query or 'none'}",
                 ]
@@ -283,6 +291,28 @@ def render_live_report(run: RunModel) -> str:
     lines.append("---")
     lines.append(render_brief(run))
     return "\n".join(lines)
+
+
+def _opportunity_field(row: object, field: str) -> str:
+    if row is None:
+        return "unknown"
+    from app.domain.models import PersonOpportunity
+
+    if not isinstance(row, PersonOpportunity):
+        return "unknown"
+    if field == "redis_hypothesis":
+        return row.redis_hypothesis or "unknown"
+    if field == "why_now":
+        return row.why_now or "unknown"
+    if field == "contact":
+        return row.contactability.level
+    if field == "tier":
+        return row.opportunity_tier
+    if field == "evidence":
+        return row.tier_evidence or "none"
+    if field == "action":
+        return row.decision
+    return "unknown"
 
 
 def _run(account: str, domain: str) -> RunModel:

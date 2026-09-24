@@ -329,21 +329,106 @@ def apply_redis(rows: list[PersonOpportunity], opportunities: list[Opportunity])
         row.contradicting_evidence_ids = list(primary.contradicting_evidence_ids)
 
 
-def decide_contact(row: PersonOpportunity, person: PersonRecord | None) -> str:
+_OWNERSHIP_CLAIMS = ("you own", "your team owns", "you are responsible")
+
+
+def opportunity_tier(row: PersonOpportunity, person: PersonRecord | None) -> str:
+    """Separate factual ownership from whether a human may review outreach."""
+    if person is None or person.contradictions or not row.technical_problem:
+        return "TIER_D_INSUFFICIENT"
+    role_current = _current_role(person)
+    function_strong = _strong_function(person)
+    verified_function = function_strong or row.person_kind == "problem_owner"
+    level = person.ownership_level
+    if (
+        role_current
+        and verified_function
+        and level in {"explicit", "strong"}
+        and row.why_now_credible
+        and row.redis_credible
+        and row.person_kind == "problem_owner"
+    ):
+        return "TIER_A_VERIFIED_OWNER"
+    if (
+        role_current
+        and function_strong
+        and level == "probable"
+        and row.why_now_credible
+        and row.redis_credible
+    ):
+        return "TIER_B_PROBABLE_OWNER"
+    if role_current or person.function_level not in {"unknown", "weak"} or person.function_guess:
+        return "TIER_C_RELEVANT_PERSON"
+    return "TIER_D_INSUFFICIENT"
+
+
+def eligibility_for(tier: str, row: PersonOpportunity, person: PersonRecord | None) -> str:
     if person is not None and person.contradictions:
         return "ignore"
-    has_problem = bool(row.technical_problem)
-    level = "unknown" if person is None else person.ownership_level
-    owns = row.person_kind == "problem_owner" and level in {"explicit", "strong"}
-    if has_problem and owns and row.why_now_credible and row.redis_credible:
+    if tier == "TIER_A_VERIFIED_OWNER":
         return "contact_now"
-    if level == "probable":
+    if tier == "TIER_B_PROBABLE_OWNER":
+        return "human_review"
+    if tier == "TIER_C_RELEVANT_PERSON":
         return "research_more"
-    if not has_problem and not owns:
+    if not row.technical_problem:
         return "ignore"
-    if row.person_kind == "executive" and not owns:
-        return "nurture" if has_problem else "research_more"
+    if row.person_kind == "executive":
+        return "nurture"
     return "research_more"
+
+
+def tier_evidence_for(row: PersonOpportunity, person: PersonRecord | None, tier: str) -> str:
+    if person is None:
+        return "No person record."
+    return (
+        f"role={person.role_state or person.validity}; "
+        f"function={person.function_level}; "
+        f"ownership={person.ownership_level}; "
+        f"trigger={row.why_now_credible}; "
+        f"redis={row.redis_credible}; "
+        f"tier={tier}"
+    )
+
+
+def exploratory_message(*, name: str, role: str, account: str, problem: str) -> str:
+    """Tier B copy. It must not turn probable ownership into a fact."""
+    focus = problem or "this technical problem"
+    return (
+        f"OWNERSHIP = PROBABLE, NOT VERIFIED\n"
+        f"{name} — {role} at {account}\n\n"
+        f"We've been seeing teams working on {focus} run into latency on the serving path.\n"
+        f"Curious whether this is something your platform team is evaluating.\n"
+        f"Not sure if this sits with you, but the public account signal is current.\n\n"
+        "— draft for human review, not sent"
+    )
+
+
+def ownership_claim(text: str) -> bool:
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in _OWNERSHIP_CLAIMS)
+
+
+def decide_contact(row: PersonOpportunity, person: PersonRecord | None) -> str:
+    tier = opportunity_tier(row, person)
+    row.opportunity_tier = tier  # type: ignore[assignment]
+    row.ownership_confidence = "unknown" if person is None else person.ownership_level
+    row.tier_evidence = tier_evidence_for(row, person, tier)
+    return eligibility_for(tier, row, person)
+
+
+def _current_role(person: PersonRecord) -> bool:
+    if person.role_state in {"current", "probable_current"}:
+        return True
+    return bool(person.title) and person.validity == "current" and person.role_freshness != "historical"
+
+
+def _strong_function(person: PersonRecord) -> bool:
+    if person.function_level == "weak":
+        return False
+    if person.function_level in {"explicit", "strong"}:
+        return True
+    return bool(person.function_guess) and bool(person.footprint_topics)
 
 
 def decide_channel(row: PersonOpportunity, *, prior_touches: int = 0) -> str:
@@ -353,6 +438,8 @@ def decide_channel(row: PersonOpportunity, *, prior_touches: int = 0) -> str:
     contact = row.contactability
     if prior_touches > 0 and row.decision != "contact_now":
         return "none"
+    if row.decision == "human_review" and contact.known_role:
+        return "email"
     if row.person_kind == "problem_owner" and row.decision == "contact_now":
         if contact.public_email:
             return "email"
