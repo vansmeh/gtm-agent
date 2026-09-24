@@ -195,6 +195,16 @@ class PersonHypothesis(BaseModel):
     signal_label: str
     likely_functions: list[str]
     candidate_role_families: list[str]
+    rationale: str = ""
+
+
+class PersonSearchTrace(BaseModel):
+    query: str
+    candidate: str = ""
+    source: str = ""
+    finding: str
+    decision: Literal["accept", "reject"]
+    reason: str
 
 
 class PersonOpportunity(BaseModel):
@@ -281,7 +291,10 @@ class RunModel(BaseModel):
     functions: list[OwningFunction] = Field(default_factory=list)
     people: list[PersonRecord] = Field(default_factory=list)
     person_hypotheses: list[PersonHypothesis] = Field(default_factory=list)
+    person_traces: list[PersonSearchTrace] = Field(default_factory=list)
     person_opportunities: list[PersonOpportunity] = Field(default_factory=list)
+    research_missing: list[str] = Field(default_factory=list)
+    next_research_question: str = ""
     why_now: list[WhyNowEvent] = Field(default_factory=list)
     opportunities: list[Opportunity] = Field(default_factory=list)
     template_choice: TemplateChoice | None = None

@@ -7,6 +7,7 @@ from datetime import datetime
 
 from app.domain.models import (
     PersonRecord,
+    PersonSearchTrace,
     Recommendation,
     ResearchLogEntry,
     RunModel,
@@ -19,10 +20,14 @@ from app.opportunity.person_opportunity import (
     apply_why_now,
     assign_threads,
     build_opportunities,
+    c_suite_without_specialist_role,
     decide_channel,
     decide_contact,
+    footprint_queries,
     hypotheses_for,
     hypothesis_queries,
+    research_gap,
+    trigger_queries,
 )
 from app.opportunity.redis_mapper import map_opportunities
 from app.opportunity.why_now import detect_why_now
@@ -198,33 +203,84 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
         function_label = run.functions[0].label if run.functions else ""
         signal_label = " ".join(item.label for item in run.signals[:2]) or "technical"
         queries = (
-            hypothesis_queries(run.account_name, run.person_hypotheses)
-            + person_discovery_queries(run.account_name, run.domain, function_label, signal_label)
+            person_discovery_queries(run.account_name, run.domain, function_label, signal_label)
+            + hypothesis_queries(run.account_name, run.person_hypotheses)
         )[: deps.person_query_budget]
         collected: list[tuple[int, str, str | None]] = []
         seen_hits: set[str] = set()
         for query in queries:
             hits = deps.search.search(query, limit=4)
             _log(run, "people", f"Person discovery query {query!r} returned {len(hits)} hits.")
+            run.person_traces.append(
+                PersonSearchTrace(
+                    query=query,
+                    finding=f"{len(hits)} public hits",
+                    decision="accept" if hits else "reject",
+                    reason="hits returned" if hits else "no public hits",
+                )
+            )
             for hit in hits:
                 if hit.url in seen_hits:
                     continue
                 seen_hits.add(hit.url)
                 collected.append((source_rank(hit.url, run.domain), hit.url, hit.published_at))
         collected.sort(key=lambda item: item[0])
+        discovery_page_cap = max(1, run.person_page_budget - 2)
         for _rank, url, published in collected:
-            if run.person_pages_used >= run.person_page_budget:
+            if run.person_pages_used >= discovery_page_cap:
                 break
             _ingest_page(run, deps, url, published, person_slot=True)
         observed_on = run.observed_at.date()
         mentions = discover_mentions(run.observations, run.account_name)
-        for mention in mentions[:3]:
-            if run.person_pages_used >= run.person_page_budget:
-                break
-            follow = deps.search.search(f"{mention.name} {run.account_name}", limit=3)
-            _log(run, "people", f"Verification query for {mention.name} returned {len(follow)} hits.")
-            for hit in follow[:2]:
-                _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
+        topic = signal_label or "architecture"
+        followed = 0
+        for mention in mentions:
+            if c_suite_without_specialist_role(mention.title):
+                run.person_traces.append(
+                    PersonSearchTrace(
+                        query="",
+                        candidate=mention.name,
+                        source=mention.url,
+                        finding=mention.title,
+                        decision="reject",
+                        reason="C-suite title without a specialist role or ownership evidence",
+                    )
+                )
+                continue
+            if followed >= 2 or run.person_pages_used >= run.person_page_budget:
+                run.person_traces.append(
+                    PersonSearchTrace(
+                        query="",
+                        candidate=mention.name,
+                        source=mention.url,
+                        finding=mention.title,
+                        decision="reject",
+                        reason="person search budget exhausted before footprint research",
+                    )
+                )
+                continue
+            stages = (
+                footprint_queries(mention.name, run.account_name, topic)[:1]
+                + trigger_queries(mention.name, run.account_name)[:1]
+            )
+            for query in stages:
+                if run.person_pages_used >= run.person_page_budget:
+                    break
+                follow = deps.search.search(query, limit=4)
+                run.person_traces.append(
+                    PersonSearchTrace(
+                        query=query,
+                        candidate=mention.name,
+                        source=mention.url,
+                        finding=f"{len(follow)} follow-up hits",
+                        decision="accept",
+                        reason="identity passed; checking technical footprint and a person-specific trigger",
+                    )
+                )
+                fresh = [hit for hit in follow if hit.url not in run.fetched_urls]
+                for hit in fresh[:2]:
+                    _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
+            followed += 1
         mentions = discover_mentions(run.observations, run.account_name)
         if mentions:
             lead = mentions[0].name
@@ -261,6 +317,25 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 persona_id=map_persona(identity.title, deps.playbook),
             )
             record.authored_urls = [item.url for item in record.activity if item.authored]
+            if identity.contradictions:
+                reason = "contradictory identity"
+                decision = "reject"
+            elif status == "unknown":
+                reason = "responsibility not supported after verification"
+                decision = "reject"
+            else:
+                reason = "identity, role, and responsibility evidence found"
+                decision = "accept"
+            run.person_traces.append(
+                PersonSearchTrace(
+                    query="",
+                    candidate=identity.name,
+                    source=identity.urls[0] if identity.urls else "",
+                    finding=identity.excerpt[:180],
+                    decision=decision,  # type: ignore[arg-type]
+                    reason=reason,
+                )
+            )
             people.append(record)
         run.people = people
         _log(run, "verify", f"Verified {len(people)} people from fetched pages.")
@@ -553,6 +628,23 @@ def recommend(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     "contact_confidence": fit.contact_confidence,
                 }
             )
+        problem = strongest_problem(run.signals)
+        primary_case = next((item for item in run.opportunities if item.is_primary), None)
+        account_hypothesis = primary_case is not None and primary_case.relevance in {
+            "plausible",
+            "strongly_supported",
+        }
+        missing, question = research_gap(
+            account_name=run.account_name,
+            problem=problem.label if problem else "",
+            has_owner=any(person.selection_status == "verified_person" for person in run.people),
+            has_trigger=any(row.why_now_credible for row in run.person_opportunities),
+            has_hypothesis=account_hypothesis or any(row.redis_credible for row in run.person_opportunities),
+        )
+        run.research_missing = missing
+        run.next_research_question = question
+        if missing:
+            _log(run, "research_more", "MISSING: " + "; ".join(missing) + f" NEXT: {question}")
         run.action_id = str(uuid.uuid4())
         for row in run.person_opportunities:
             if row.thread_role == "primary_contact":

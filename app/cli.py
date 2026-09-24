@@ -56,9 +56,36 @@ def render_live_report(run: RunModel) -> str:
         f"ACCOUNT: {run.account_name}",
         f"TECHNICAL SIGNAL: {signal}",
         f"LIKELY FUNCTION: {function}",
-        "LIKELY FUNCTIONS: " + (", ".join(item.label for item in run.functions) or function),
+        "LIKELY FUNCTIONS: "
+        + (
+            "; ".join(
+                f"{item.signal_label}: {', '.join(item.likely_functions)}" for item in run.person_hypotheses
+            )
+            or ", ".join(item.label for item in run.functions)
+            or function
+        ),
+        "PERSON SEARCH TRACE:",
+        "CANDIDATES DISCOVERED: "
+        + str(len({trace.candidate for trace in run.person_traces if trace.candidate}) or len(run.people)),
+        "CANDIDATES REJECTED: "
+        + str(len([trace for trace in run.person_traces if trace.decision == "reject" and trace.candidate])),
+        *[
+            f"- {trace.candidate}: {trace.reason}"
+            for trace in run.person_traces
+            if trace.decision == "reject" and trace.candidate
+        ],
+        "CANDIDATES VERIFIED: "
+        + str(len([person for person in run.people if person.selection_status == "verified_person"])),
+        f"PERSONOPPORTUNITIES: {len(run.person_opportunities)}",
         "PERSON OPPORTUNITIES:",
     ]
+    trace_at = lines.index("PERSON SEARCH TRACE:") + 1
+    trace_lines = [
+        f"- query={trace.query or '-'} candidate={trace.candidate or '-'} "
+        f"source={trace.source or '-'} decision={trace.decision} reason={trace.reason}"
+        for trace in run.person_traces
+    ] or ["- none"]
+    lines[trace_at:trace_at] = trace_lines
     if not run.person_opportunities:
         lines.append("none")
     evidence_by_id = {item.id: item for item in run.evidence}
@@ -129,6 +156,10 @@ def render_live_report(run: RunModel) -> str:
     unknowns = [] if rec is None else rec.unknown
     lines.append("UNKNOWN:")
     lines.extend(f"- {item}" for item in unknowns[:8])
+    if run.research_missing:
+        lines.append("MISSING:")
+        lines.extend(f"- {item}" for item in run.research_missing)
+        lines.append(f"NEXT RESEARCH QUESTION: {run.next_research_question}")
     lines.append("RECOMMENDED ACTION: " + ("review only" if rec is None else rec.disposition))
     lines.append("CHANNEL: " + ("none" if rec is None or not rec.channel else rec.channel))
     lines.append("TEMPLATE: " + ("none" if rec is None or not rec.template_id else rec.template_id))

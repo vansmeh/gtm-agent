@@ -29,6 +29,7 @@ _FAMILIES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
 )
 _EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 _ACCESS = ("director", "head of", "manager")
+_ROLES = ("Head", "Director", "VP", "Lead", "Principal", "Staff", "Architect", "Engineering Manager")
 
 
 def hypotheses_for(signals: list[TechnicalSignal]) -> list[PersonHypothesis]:
@@ -41,27 +42,82 @@ def hypotheses_for(signals: list[TechnicalSignal]) -> list[PersonHypothesis]:
                     if role not in families:
                         families.append(role)
         if not families:
-            families = ["Engineering"]
+            families = ["Platform", "Infrastructure", "Architecture"]
+        functions = families[:5]
         built.append(
             PersonHypothesis(
                 id=str(uuid.uuid4()),
                 signal_id=signal.id,
                 signal_label=signal.label,
-                likely_functions=families[:3],
-                candidate_role_families=families,
+                likely_functions=functions,
+                candidate_role_families=list(_ROLES),
+                rationale=(
+                    f"{signal.label} maps to {', '.join(functions)} "
+                    "because the public signal describes that work. Titles alone are not the mapping."
+                ),
             )
         )
     return built
 
 
 def hypothesis_queries(account_name: str, hypotheses: list[PersonHypothesis]) -> list[str]:
+    topic = hypotheses[0].signal_label if hypotheses else ""
+    short = "vector search" if "vector" in topic.lower() else "search" if "search" in topic.lower() else ""
     queries: list[str] = []
-    for item in hypotheses:
-        for family in item.candidate_role_families[:3]:
-            query = f"{account_name} {family}"
-            if query not in queries:
-                queries.append(query)
+    for role in ("Staff", "Principal", "Architect", "Head", "Director"):
+        query = f"{account_name} {role} {short}".strip()
+        if query not in queries:
+            queries.append(query)
     return queries
+
+
+def footprint_queries(name: str, account_name: str, topic: str) -> list[str]:
+    focus = topic or "architecture"
+    return [
+        f"\"{name}\" {account_name} {focus}",
+        f"\"{name}\" {account_name} architecture",
+        f"\"{name}\" {account_name} conference",
+        f"\"{name}\" github",
+    ]
+
+
+def trigger_queries(name: str, account_name: str) -> list[str]:
+    return [f"\"{name}\" {account_name} talk OR article OR launch OR hiring OR promotion"]
+
+
+def c_suite_without_specialist_role(title: str) -> bool:
+    lowered = title.lower()
+    specialist = re.search(
+        r"\b(head of|director|vice president|\bvp\b|lead|principal|staff|architect|engineering manager)\b",
+        lowered,
+    )
+    if specialist:
+        return False
+    return re.search(r"\b(chief|ceo|cto|founder|president)\b", lowered) is not None
+
+
+def research_gap(
+    *,
+    account_name: str,
+    problem: str,
+    has_owner: bool,
+    has_trigger: bool,
+    has_hypothesis: bool,
+) -> tuple[list[str], str]:
+    missing: list[str] = []
+    if not has_owner:
+        missing.append("verified problem owner")
+    if not has_trigger:
+        missing.append("person-specific trigger")
+    if not has_hypothesis:
+        missing.append("credible Redis hypothesis")
+    if not problem:
+        missing.append("relevant technical problem")
+    if not missing:
+        return [], ""
+    focus = problem or "the technical problem"
+    question = f"Which {account_name} engineers publicly own {focus}?"
+    return missing, question
 
 
 def person_kind_for(person: PersonRecord) -> str:
@@ -86,7 +142,9 @@ def contactability_for(person: PersonRecord, evidence: list[Evidence]) -> Contac
     named = [item for item in evidence if person.name in item.excerpt]
     urls = " ".join(person.source_urls).lower()
     public_email = _EMAIL.search(person.identity_excerpt) is not None
-    public_profile = any(host in urls for host in ("github.com", "/speaker", "/talk", "conference"))
+    public_profile = any(
+        host in urls for host in ("github.com", "/speaker", "/talk", "conference", "/author", "/bio", "/contact")
+    )
     technical = bool(person.authored_urls) or bool(person.footprint_topics)
     known_role = bool(person.title) and person.identity_confidence >= 0.55 and not person.contradictions
     recency = person.validity == "current"
@@ -176,9 +234,6 @@ def apply_why_now(rows: list[PersonOpportunity], events: list[WhyNowEvent], evid
         ]
         if named:
             row.why_now = named[0].excerpt
-            row.why_now_credible = True
-        elif credible and row.person_kind == "problem_owner":
-            row.why_now = credible[0].summary
             row.why_now_credible = True
         else:
             row.why_now = "unknown"

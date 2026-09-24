@@ -9,7 +9,8 @@ from app.domain.models import Evidence, Observation
 _TITLE = (
     r"(?:Head of|VP|Vice President(?: of)?|Director of|Chief|CEO|CTO|CIO|CPO|"
     r"Co-Founder|Founder|SVP|EVP|President|Principal|Staff|Distinguished|"
-    r"Engineering Manager|Software Engineer|Architect|Evangelist|Advocate)"
+    r"Engineering Manager|Engineering Lead|Tech Lead|Lead Engineer|"
+    r"Software Engineer|Architect|Evangelist|Advocate)"
 )
 _PREFIX = r"(?:senior |staff |principal |lead |distinguished |software ){0,3}"
 _NAME = r"([A-Z][a-z]+(?: [A-Z][a-z]+){1,2})"

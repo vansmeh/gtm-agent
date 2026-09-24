@@ -26,19 +26,19 @@ def person_discovery_queries(
     function_label: str,
     signal_label: str,
 ) -> list[str]:
+    """Specialist and technical-source queries. Corporate team pages are not first."""
     function = function_label or "engineering"
     host = domain or account_name
-    title = _title_for_function(function)
     topic = _topic_phrase(signal_label, function)
     return [
-        f"site:{host} team",
-        f"{account_name} team",
         f"{account_name} {topic} blog",
         f"{account_name} conference speaker {topic}",
-        f"{account_name} {function}",
-        f"{account_name} {title}",
+        f"{account_name} {topic} interview",
         f"site:github.com {account_name} {topic}",
-        f"{account_name} engineering leadership",
+        f"site:{host} {topic}",
+        f"{account_name} staff engineer {topic}",
+        f"{account_name} principal {function}",
+        f"{account_name} architect {topic}",
     ]
 
 
@@ -77,10 +77,17 @@ def source_rank(url: str, domain: str) -> int:
         "job_posting": 6,
         "untrusted_web": 7,
     }.get(kind, 7)
+    path = url.lower()
+    if any(part in path for part in ("/company/team", "/leadership", "/executive")):
+        return 9
     if official and kind == "biography":
-        return 0
+        return 4
+    if kind in {"blog", "conference"}:
+        return 0 if official else 1
+    if kind == "public_code":
+        return 2
     if official:
-        return min(kind_rank, 2)
+        return min(kind_rank, 3)
     return kind_rank
 
 
