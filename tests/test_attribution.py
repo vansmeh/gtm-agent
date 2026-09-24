@@ -43,6 +43,12 @@ def test_article_author_speaker_and_github_contributor() -> None:
     assert strengthens_expertise("author")
     assert strengthens_expertise("speaker")
     assert strengthens_expertise("contributor")
+    hosted = attributions_in(
+        "I had the pleasure of hosting Aparna Subramanian, the Director of Production Engineering at Shopify.",
+        "https://logz.io/blog/scaling-platform-engineering-shopify-blueprint/",
+    )
+    assert ("Aparna Subramanian", "interviewee") in hosted
+    assert not strengthens_expertise("interviewee")
 
 
 def test_slug_and_mention_do_not_count_as_authorship() -> None:
