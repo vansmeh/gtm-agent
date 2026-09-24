@@ -140,10 +140,12 @@ def research_gap(
     has_owner: bool,
     has_trigger: bool,
     has_hypothesis: bool,
+    functions: list[str] | None = None,
 ) -> tuple[list[str], str]:
     missing: list[str] = []
+    function = (functions or ["Platform"])[0].title()
     if not has_owner:
-        missing.append("verified problem owner")
+        missing.append(f"Current {function} owner")
     if not has_trigger:
         missing.append("current trigger linked to a current owner")
     if not has_hypothesis:
@@ -152,8 +154,10 @@ def research_gap(
         missing.append("relevant technical problem")
     if not missing:
         return [], ""
-    focus = problem or "the technical problem"
-    question = f"Which {account_name} engineers publicly own {focus}?"
+    focus = problem or "the affected system"
+    question = (
+        f"Find current {account_name} {function} leadership and verify ownership of {focus}."
+    )
     return missing, question
 
 
@@ -287,7 +291,8 @@ def apply_why_now(
             person is not None
             and person.validity == "current"
             and person.current_ownership
-            and person.responsibility_status in {"confirmed", "probable"}
+            and             person.responsibility_status in {"confirmed", "probable"}
+            and person.ownership_level in {"explicit", "strong"}
             and credible
         ):
             row.why_now = "Current account event affects a function this person currently owns."
@@ -323,9 +328,12 @@ def decide_contact(row: PersonOpportunity, person: PersonRecord | None) -> str:
     if person is not None and person.contradictions:
         return "ignore"
     has_problem = bool(row.technical_problem)
-    owns = row.person_kind == "problem_owner"
+    level = "unknown" if person is None else person.ownership_level
+    owns = row.person_kind == "problem_owner" and level in {"explicit", "strong"}
     if has_problem and owns and row.why_now_credible and row.redis_credible:
         return "contact_now"
+    if level == "probable":
+        return "research_more"
     if not has_problem and not owns:
         return "ignore"
     if row.person_kind == "executive" and not owns:

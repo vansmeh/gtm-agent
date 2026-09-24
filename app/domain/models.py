@@ -109,6 +109,8 @@ class PersonRecord(BaseModel):
     role_freshness: Literal["current", "historical", "unknown"] = "unknown"
     evidence_classes: list[str] = Field(default_factory=list)
     current_ownership: str = ""
+    ownership_level: Literal["explicit", "strong", "probable", "weak", "unknown"] = "unknown"
+    ownership_evidence_ids: list[str] = Field(default_factory=list)
     historical_expertise: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
     source_urls: list[str]
@@ -314,6 +316,8 @@ class RunModel(BaseModel):
     signals: list[TechnicalSignal] = Field(default_factory=list)
     functions: list[OwningFunction] = Field(default_factory=list)
     people: list[PersonRecord] = Field(default_factory=list)
+    affected_functions: list[str] = Field(default_factory=list)
+    function_evidence_ids: list[str] = Field(default_factory=list)
     person_hypotheses: list[PersonHypothesis] = Field(default_factory=list)
     person_traces: list[PersonSearchTrace] = Field(default_factory=list)
     snippet_leads: list[SnippetLead] = Field(default_factory=list)

@@ -39,6 +39,7 @@ from app.opportunity.why_now import detect_why_now
 from app.person.discovery import discover_mentions
 from app.person.freshness import ACCOUNT_TRIGGER_DAYS, resolve_freshness
 from app.person.identity import identities_from_mentions, validity_for
+from app.person.ownership import affected_functions, classify_ownership, function_owner_queries, job_function_evidence
 from app.person.person_account_fit import assess_fit
 from app.person.persona_mapping import map_persona
 from app.person.public_activity import collect_activity
@@ -56,7 +57,7 @@ from app.playbook.selection import (
 from app.research.bounds import evidence_is_sufficient, person_discovery_queries, queries_for, source_rank
 from app.research.extract import extract_evidence, observation_from_page
 from app.research.fetch import PageFetcher
-from app.research.search import SearchProvider
+from app.research.search import SearchProvider, is_allowed_public_url
 from app.sheets.provider import SheetsProvider
 from app.signals.detection import detect_signals, strongest_problem
 from app.signals.functions import detect_functions
@@ -211,10 +212,13 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
         run = load_run(state)
         function_label = run.functions[0].label if run.functions else ""
         signal_label = " ".join(item.label for item in run.signals[:2]) or "technical"
+        run.affected_functions = affected_functions(signal_label) if run.signals else []
         queries = (
             person_discovery_queries(run.account_name, run.domain, function_label, signal_label)
             + hypothesis_queries(run.account_name, run.person_hypotheses)
         )[: deps.person_query_budget]
+        if run.affected_functions:
+            queries = function_owner_queries(run.account_name, run.domain, run.affected_functions)[:4] + queries
         collected: list[tuple[int, str, str | None]] = []
         seen_hits: set[str] = set()
         for query in queries:
@@ -231,7 +235,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 )
             )
             for hit in hits:
-                if hit.url in seen_hits:
+                if hit.url in seen_hits or not is_allowed_public_url(hit.url):
                     continue
                 seen_hits.add(hit.url)
                 collected.append((source_rank(hit.url, run.domain), hit.url, hit.published_at))
@@ -353,6 +357,15 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             record.evidence_classes = resolved.evidence_classes
             record.current_ownership = resolved.current_ownership
             record.historical_expertise = resolved.historical_expertise
+            level, evidence_ids = classify_ownership(
+                identity.name,
+                identity.title,
+                run.evidence,
+                observed_on=observed_on,
+                functions=run.affected_functions,
+            )
+            record.ownership_level = level  # type: ignore[assignment]
+            record.ownership_evidence_ids = evidence_ids
             if identity.contradictions:
                 reason = "contradictory identity"
                 decision = "reject"
@@ -488,7 +501,11 @@ def _verify_snippet_leads(run: RunModel, deps: PipelineDeps, mentions: Sequence[
         _note_search(run, query, hits)
         if lead.url not in run.fetched_urls and run.person_pages_used < run.person_page_budget:
             _ingest_page(run, deps, lead.url, None, person_slot=True)
-        fresh = [hit for hit in hits if hit.url not in run.fetched_urls and hit.url != lead.url]
+        fresh = [
+            hit
+            for hit in hits
+            if hit.url not in run.fetched_urls and hit.url != lead.url and is_allowed_public_url(hit.url)
+        ]
         for hit in fresh[:1]:
             if run.person_pages_used >= run.person_page_budget:
                 break
@@ -803,12 +820,15 @@ def recommend(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             "plausible",
             "strongly_supported",
         }
+        run.function_evidence_ids = [item.id for item in job_function_evidence(run.evidence)]
+        owner_levels = {"explicit", "strong"}
         missing, question = research_gap(
             account_name=run.account_name,
             problem=problem.label if problem else "",
-            has_owner=any(person.selection_status == "verified_person" for person in run.people),
+            has_owner=any(person.ownership_level in owner_levels for person in run.people),
             has_trigger=any(row.why_now_credible for row in run.person_opportunities),
             has_hypothesis=account_hypothesis or any(row.redis_credible for row in run.person_opportunities),
+            functions=run.affected_functions,
         )
         run.research_missing = missing
         run.next_research_question = question

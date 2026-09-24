@@ -116,9 +116,9 @@ def test_next_question_names_the_missing_owner() -> None:
         has_trigger=False,
         has_hypothesis=True,
     )
-    assert "verified problem owner" in missing
+    assert "Current Platform owner" in missing
     assert "current trigger linked to a current owner" in missing
-    assert question == "Which Redis engineers publicly own vector search?"
+    assert question == "Find current Redis Platform leadership and verify ownership of vector search."
 
 
 def _run(tmp_path: Path, docs: list[DocumentRecord]):
@@ -166,4 +166,4 @@ def test_c_suite_candidate_is_rejected_with_a_reason(tmp_path: Path) -> None:
     assert rejected
     assert "C-suite" in rejected[0].reason or "responsibility" in rejected[0].reason
     assert all(person.selection_status != "verified_person" for person in run.people)
-    assert run.next_research_question.startswith("Which Northwind engineers")
+    assert run.next_research_question.startswith("Find current Northwind")

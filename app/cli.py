@@ -54,7 +54,10 @@ def render_live_report(run: RunModel) -> str:
     selected = next((person for person in run.people if person.selection_status == "verified_person"), None)
     lines = [
         f"ACCOUNT: {run.account_name}",
+        "TECHNICAL SIGNAL: " + signal,
         "TECHNICAL SIGNALS: " + (", ".join(item.label for item in run.signals) or signal),
+        "AFFECTED FUNCTIONS: " + (", ".join(run.affected_functions) or "unknown"),
+        "CURRENT FUNCTION EVIDENCE: " + (", ".join(run.function_evidence_ids) or "none"),
         f"LIKELY FUNCTION: {function}",
         "LIKELY FUNCTIONS: "
         + (
@@ -82,6 +85,7 @@ def render_live_report(run: RunModel) -> str:
         "CANDIDATES VERIFIED: "
         + str(len([person for person in run.people if person.selection_status == "verified_person"])),
         f"PERSONOPPORTUNITIES: {len(run.person_opportunities)}",
+        "CURRENT CANDIDATES:",
         "VERIFIED PEOPLE:",
     ]
     query_at = lines.index("QUERIES:") + 1
@@ -94,6 +98,30 @@ def render_live_report(run: RunModel) -> str:
         if any(person.name in item.excerpt for person in run.people)
     ]
     lines[evidence_at:evidence_at] = named_evidence[:8] or ["- none"]
+    candidate_at = lines.index("CURRENT CANDIDATES:") + 1
+    candidate_lines = []
+    for person in run.people:
+        candidate_lines.append(
+            "\n".join(
+                [
+                    f"NAME: {person.name}",
+                    f"CURRENT ROLE: {person.title or 'unknown'}",
+                    f"CURRENTNESS: {person.role_freshness}",
+                    f"OWNERSHIP LEVEL: {person.ownership_level}",
+                    "OWNERSHIP EVIDENCE: " + (", ".join(person.ownership_evidence_ids) or "none"),
+                    "TECHNICAL EVIDENCE: " + (", ".join(person.footprint_topics) or "none"),
+                    f"PERSON/PROBLEM FIT: {_fit_line(person)}",
+                    f"WHY NOW: {person.current_ownership or 'unknown'}",
+                ]
+            )
+        )
+    lines[candidate_at:candidate_at] = candidate_lines or ["none"]
+    owners = [person for person in run.people if person.ownership_level in {"explicit", "strong"}]
+    final_at = lines.index("VERIFIED PEOPLE:")
+    lines.insert(
+        final_at,
+        "FINAL: " + (f"VERIFIED CURRENT OWNER: {owners[0].name}" if owners else "NO CURRENT OWNER FOUND"),
+    )
     trace_at = lines.index("PERSON SEARCH TRACE:") + 1
     trace_lines = [
         f"- query={trace.query or '-'} candidate={trace.candidate or '-'} "

@@ -164,6 +164,7 @@ def test_current_owner_links_to_a_current_account_trigger() -> None:
         validity="current",
         role_freshness="current",
         current_ownership="Ada Lovelace, VP Platform, owns platform infrastructure.",
+        ownership_level="explicit",
         source_urls=["https://northwind.example/team"],
         seniority=0.7,
         function_guess="Platform",
