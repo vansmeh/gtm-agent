@@ -57,6 +57,7 @@ def render_live_report(run: RunModel) -> str:
         "TECHNICAL SIGNAL: " + signal,
         "TECHNICAL SIGNALS: " + (", ".join(item.label for item in run.signals) or signal),
         "AFFECTED FUNCTIONS: " + (", ".join(run.affected_functions) or "unknown"),
+        "ARTIFACTS FOUND:",
         "CURRENT FUNCTION EVIDENCE: " + (", ".join(run.function_evidence_ids) or "none"),
         f"LIKELY FUNCTION: {function}",
         "LIKELY FUNCTIONS: "
@@ -98,6 +99,12 @@ def render_live_report(run: RunModel) -> str:
         if any(person.name in item.excerpt for person in run.people)
     ]
     lines[evidence_at:evidence_at] = named_evidence[:8] or ["- none"]
+    artifact_at = lines.index("ARTIFACTS FOUND:") + 1
+    artifact_lines = [
+        f"- {item.kind} | {item.topic} | {item.author} | {item.published_at or 'undated'} | {item.source_url}"
+        for item in run.artifacts
+    ]
+    lines[artifact_at:artifact_at] = artifact_lines or ["- none"]
     candidate_at = lines.index("CURRENT CANDIDATES:") + 1
     candidate_lines = []
     for person in run.people:
@@ -106,7 +113,10 @@ def render_live_report(run: RunModel) -> str:
                 [
                     f"NAME: {person.name}",
                     f"CURRENT ROLE: {person.title or 'unknown'}",
-                    f"CURRENTNESS: {person.role_freshness}",
+                    f"CURRENTNESS: {person.currentness}",
+                    f"CANDIDATE CLASS: {person.candidate_class}",
+                    "TECHNICAL EXPERTISE: " + (", ".join(person.historical_expertise) or "none"),
+                    f"CURRENT FUNCTION: {person.function_guess or 'unknown'}",
                     f"OWNERSHIP LEVEL: {person.ownership_level}",
                     "OWNERSHIP EVIDENCE: " + (", ".join(person.ownership_evidence_ids) or "none"),
                     "TECHNICAL EVIDENCE: " + (", ".join(person.footprint_topics) or "none"),

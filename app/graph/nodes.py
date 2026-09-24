@@ -8,6 +8,7 @@ from datetime import datetime
 
 from app.domain.models import (
     Evidence,
+    OwnershipLink,
     PersonRecord,
     PersonSearchTrace,
     Recommendation,
@@ -15,6 +16,7 @@ from app.domain.models import (
     RunModel,
     SearchExecution,
     SnippetLead,
+    TechnicalArtifact,
     TemplateChoice,
 )
 from app.graph.state import GraphState, dump_run, load_run
@@ -36,10 +38,20 @@ from app.opportunity.person_opportunity import (
 )
 from app.opportunity.redis_mapper import map_opportunities
 from app.opportunity.why_now import detect_why_now
+from app.person.artifact_discovery import (
+    artifact_queries,
+    artifacts_from_evidence,
+    candidate_class,
+    converge_ownership,
+    currentness_for,
+    person_artifact_queries,
+    team_follow_up_queries,
+    teams_in_text,
+)
 from app.person.discovery import discover_mentions
 from app.person.freshness import ACCOUNT_TRIGGER_DAYS, resolve_freshness
 from app.person.identity import identities_from_mentions, validity_for
-from app.person.ownership import affected_functions, classify_ownership, function_owner_queries, job_function_evidence
+from app.person.ownership import affected_functions, classify_ownership, job_function_evidence
 from app.person.person_account_fit import assess_fit
 from app.person.persona_mapping import map_persona
 from app.person.public_activity import collect_activity
@@ -217,8 +229,8 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             person_discovery_queries(run.account_name, run.domain, function_label, signal_label)
             + hypothesis_queries(run.account_name, run.person_hypotheses)
         )[: deps.person_query_budget]
-        if run.affected_functions:
-            queries = function_owner_queries(run.account_name, run.domain, run.affected_functions)[:4] + queries
+        if run.signals:
+            queries = artifact_queries(run.account_name, run.domain, signal_label)[:6] + queries
         collected: list[tuple[int, str, str | None]] = []
         seen_hits: set[str] = set()
         for query in queries:
@@ -278,6 +290,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 continue
             stages = (
                 current_role_queries(mention.name, run.account_name, run.domain, mention.title)[:2]
+                + person_artifact_queries(mention.name, run.account_name, topic)[:1]
                 + footprint_queries(mention.name, run.account_name, topic)[:1]
                 + trigger_queries(mention.name, run.account_name)[:1]
             )
@@ -317,14 +330,35 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             for hit in check[:1]:
                 _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
             mentions = discover_mentions(run.observations, run.account_name)
+        if run.signals:
+            team_names = list(
+                dict.fromkeys(
+                    team
+                    for obs in run.observations
+                    if not obs.poisoned
+                    for team in teams_in_text(obs.sanitized_text)
+                )
+            )[:1]
+            fetched_team = 0
+            for team in team_names:
+                for query in team_follow_up_queries(run.account_name, team)[:2]:
+                    hits = deps.search.search(query, limit=4)
+                    _note_search(run, query, hits)
+                    _record_snippet_leads(run, hits, query)
+                    for hit in hits:
+                        if fetched_team >= 1 or not is_allowed_public_url(hit.url) or hit.url in run.fetched_urls:
+                            continue
+                        _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
+                        fetched_team += 1
+            mentions = discover_mentions(run.observations, run.account_name)
         if not run.affected_functions:
             run.signals = detect_signals(run.evidence) or run.signals
             label = " ".join(item.label for item in run.signals[:2])
             run.affected_functions = affected_functions(label) if run.signals else []
             fetched_functions = 0
             owner_queries = (
-                function_owner_queries(run.account_name, run.domain, run.affected_functions)[:4]
-                if run.affected_functions
+                artifact_queries(run.account_name, run.domain, label)[:4]
+                if run.affected_functions and run.signals
                 else []
             )
             for query in owner_queries:
@@ -386,8 +420,27 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 observed_on=observed_on,
                 functions=run.affected_functions,
             )
+            if level not in {"explicit", "strong"}:
+                converged, converged_ids = converge_ownership(
+                    identity.name,
+                    identity.title,
+                    run.evidence,
+                    observed_on=observed_on,
+                    functions=run.affected_functions or ["platform"],
+                )
+                if converged == "strong":
+                    level = converged
+                    evidence_ids = converged_ids
             record.ownership_level = level  # type: ignore[assignment]
             record.ownership_evidence_ids = evidence_ids
+            workload = level in {"explicit", "strong"}
+            record.candidate_class = candidate_class(identity.title, workload_connected=workload)  # type: ignore[assignment]
+            record.currentness = currentness_for(  # type: ignore[assignment]
+                artifact_date=identity.first_seen,
+                role_date=identity.role_published_at,
+                text=identity.excerpt,
+                observed_on=observed_on,
+            )
             if identity.contradictions:
                 reason = "contradictory identity"
                 decision = "reject"
@@ -411,6 +464,35 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 )
             )
             people.append(record)
+        run.artifacts = [
+            TechnicalArtifact(
+                source_url=item.url,
+                topic=item.topic,
+                author=item.author,
+                published_at=item.published_at,
+                evidence_id=item.evidence_id,
+                kind=item.kind,
+            )
+            for item in artifacts_from_evidence(run.evidence, run.account_name)
+        ]
+        signal_name = run.signals[0].label if run.signals else ""
+        function_name = run.affected_functions[0] if run.affected_functions else ""
+        run.ownership_links = [
+            OwnershipLink(
+                signal=signal_name,
+                function=function_name,
+                artifact_url=item.source_url,
+                person_name=item.author,
+                current_role=next((person.title for person in people if person.name == item.author), ""),
+                current_function=function_name,
+                ownership_level=next(
+                    (person.ownership_level for person in people if person.name == item.author),
+                    "unknown",
+                ),
+                evidence_ids=[item.evidence_id],
+            )
+            for item in run.artifacts
+        ]
         run.people = people
         _log(run, "verify", f"Verified {len(people)} people from fetched pages.")
         return dump_run(run)
