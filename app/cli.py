@@ -12,7 +12,7 @@ from app.domain.models import RunModel
 from app.pipeline import PLAYBOOK_PATH, build_kernel, execute_run
 from app.playbook.selection import load_playbook
 from app.research.fetch import HttpxPageFetcher
-from app.research.search import SearXNGSearchProvider
+from app.research.search import DirectWebSearchProvider
 from app.sheets.provider import build_sheets_provider
 
 
@@ -53,6 +53,10 @@ def render_live_report(run: RunModel) -> str:
     function = run.functions[0].label if run.functions else "unknown"
     selected = next((person for person in run.people if person.selection_status == "verified_person"), None)
     lines = [
+        f"SEARCH PROVIDER = {run.search_mode}",
+        f"SEARCH URL: {run.search_endpoint or 'none'}",
+        f"TOTAL QUERIES: {run.queries_executed}",
+        f"TOTAL RESULTS: {run.results_examined}",
         f"ACCOUNT: {run.account_name}",
         "TECHNICAL SIGNAL: " + signal,
         "TECHNICAL SIGNALS: " + (", ".join(item.label for item in run.signals) or signal),
@@ -124,6 +128,19 @@ def render_live_report(run: RunModel) -> str:
         for item in run.artifacts
     ]
     lines[artifact_at:artifact_at] = artifact_lines or ["- none"]
+    chain = ["ATTRIBUTION CHAIN:"]
+    by_artifact = {item.id or item.evidence_id: item for item in run.artifacts}
+    for link in run.artifact_links:
+        artifact = by_artifact.get(link.artifact_id)
+        if artifact is None:
+            continue
+        chain.append(
+            f"RESULT {artifact.url} → ARTIFACT {artifact.kind} → PERSON {artifact.author or link.person_id} "
+            f"({link.relationship}) → TOPIC {artifact.topic}"
+        )
+    lines[artifact_at + len(artifact_lines or ["- none"]) : artifact_at + len(artifact_lines or ["- none"])] = (
+        chain or ["ATTRIBUTION CHAIN:", "none"]
+    )
     candidate_at = lines.index("CURRENT CANDIDATES:") + 1
     candidate_lines = []
     opportunity_by_person = {row.person_id: row for row in run.person_opportunities}
@@ -316,15 +333,13 @@ def _opportunity_field(row: object, field: str) -> str:
 
 
 def _run(account: str, domain: str) -> RunModel:
-    settings = Settings(search_provider="searxng", sheets_provider="mock", laya_mode="shadow")
+    settings = Settings(search_provider="direct", sheets_provider="mock", laya_mode="shadow")
     engine = make_engine(settings.database_url)
     init_db(engine)
     factory = make_session_factory(engine)
     client = httpx.Client(timeout=settings.search_timeout_seconds, follow_redirects=True)
-    search = SearXNGSearchProvider(
-        settings.searxng_base_url,
+    search = DirectWebSearchProvider(
         timeout=settings.search_timeout_seconds,
-        retries=settings.search_retries,
         budget=settings.search_budget,
     )
     with session_scope(factory) as session:

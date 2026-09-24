@@ -1,8 +1,9 @@
-"""SearchProvider: SearXNG-compatible HTTP search and an in-memory mock."""
+"""SearchProvider: public web search, SearXNG, and an in-memory mock."""
 
 import re
+import time
 from typing import Protocol, runtime_checkable
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel
 
@@ -16,6 +17,9 @@ class SearchHit(BaseModel):
     snippet: str
     published_at: str | None = None
     engine: str = ""
+    provider: str = ""
+    source: str = ""
+    latency_ms: float = 0.0
 
 
 @runtime_checkable
@@ -49,8 +53,12 @@ class DocumentRecord(BaseModel):
 class MockSearchProvider:
     """Keyword overlap over a fixture corpus. Used for tests and the synthetic demo."""
 
-    def __init__(self, documents: list[DocumentRecord]) -> None:
+    mode = "MOCK"
+
+    def __init__(self, documents: list[DocumentRecord], *, mode: str = "MOCK") -> None:
         self.documents = documents
+        self.mode = mode
+        self.endpoint = "fixture://documents"
 
     def search(self, query: str, limit: int = 3) -> list[SearchHit]:
         needed = _tokens(query)
@@ -64,12 +72,22 @@ class MockSearchProvider:
         scored.sort(key=lambda item: item[0], reverse=True)
         hits: list[SearchHit] = []
         for _score, doc in scored[:limit]:
-            hits.append(SearchHit(url=doc.url, title=doc.title, snippet=doc.text[:240]))
+            hits.append(
+                SearchHit(
+                    url=doc.url,
+                    title=doc.title,
+                    snippet=doc.text[:240],
+                    provider="mock" if self.mode == "MOCK" else "demo",
+                    source="fixture",
+                )
+            )
         return hits
 
 
 class SearXNGSearchProvider:
-    """Local or remote SearXNG JSON API. No API key. LinkedIn results are dropped."""
+    """Local or remote SearXNG JSON API. A localhost shim is not a live provider."""
+
+    endpoint_kind = "searxng"
 
     def __init__(
         self,
@@ -87,6 +105,9 @@ class SearXNGSearchProvider:
         self.calls = 0
         self._categories = ("general", "it", "science")
         self._transport = transport
+        self.endpoint = self.base_url
+        host = urlparse(self.base_url).hostname or ""
+        self.mode = "COMPAT" if host in {"localhost", "127.0.0.1"} else "LIVE"
 
     def search(self, query: str, limit: int = 3) -> list[SearchHit]:
         import asyncio
@@ -135,6 +156,87 @@ class SearXNGSearchProvider:
         return {"results": [], "error": last_error}
 
 
+class DirectWebSearchProvider:
+    """Public web search. This is the live provider. It does not read a fixture corpus."""
+
+    mode = "LIVE"
+    endpoint = "https://html.duckduckgo.com/html/"
+
+    def __init__(self, *, timeout: float = 15.0, budget: int = 12, client: object | None = None) -> None:
+        self.timeout = timeout
+        self.budget = budget
+        self.calls = 0
+        self._client = client
+
+    def search(self, query: str, limit: int = 3) -> list[SearchHit]:
+        import httpx
+
+        if self.calls >= self.budget:
+            return []
+        self.calls += 1
+        started = time.perf_counter()
+        client = self._client if isinstance(self._client, httpx.Client) else httpx.Client(timeout=self.timeout)
+        close = self._client is None
+        try:
+            response = client.post(
+                self.endpoint,
+                data={"q": query},
+                headers={"User-Agent": "redis-gtm-agent/0.1"},
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+            hits = parse_duckduckgo_html(response.text, limit=limit)
+        finally:
+            if close:
+                client.close()
+        latency = (time.perf_counter() - started) * 1000
+        stamped: list[SearchHit] = []
+        for hit in hits:
+            source = hit.source or "duckduckgo"
+            stamped.append(hit.model_copy(update={"provider": "direct-web", "latency_ms": latency, "source": source}))
+        return stamped
+
+
+def parse_duckduckgo_html(html: str, *, limit: int) -> list[SearchHit]:
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "lxml")
+    hits: list[SearchHit] = []
+    for node in soup.select("a.result__a"):
+        href = node.get("href", "")
+        if not isinstance(href, str):
+            continue
+        if "uddg=" in href:
+            href = unquote(href.split("uddg=", 1)[1].split("&", 1)[0])
+        if not is_allowed_public_url(href):
+            continue
+        snippet = ""
+        parent = node.find_parent("div", class_="result")
+        if parent is not None:
+            snippet_el = parent.select_one(".result__snippet")
+            if snippet_el is not None:
+                snippet = snippet_el.get_text(" ", strip=True)
+        hits.append(
+            SearchHit(
+                url=href,
+                title=node.get_text(" ", strip=True),
+                snippet=snippet[:240],
+                provider="direct-web",
+                source=urlparse(href).hostname or "duckduckgo",
+            )
+        )
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def provider_mode(provider: object) -> str:
+    mode = getattr(provider, "mode", "MOCK")
+    if mode not in {"LIVE", "MOCK", "DEMO"}:
+        return "MOCK"
+    return str(mode)
+
+
 def normalize_searxng_results(payload: dict[str, object], *, limit: int) -> list[SearchHit]:
     raw = payload.get("results", [])
     if not isinstance(raw, list):
@@ -157,6 +259,8 @@ def normalize_searxng_results(payload: dict[str, object], *, limit: int) -> list
                 snippet=str(item.get("content", ""))[:240],
                 published_at=published[:10] if isinstance(published, str) and len(published) >= 10 else None,
                 engine=str(engine),
+                provider="searxng",
+                source=str(engine) or (urlparse(url).hostname or ""),
             )
         )
         if len(hits) >= limit:

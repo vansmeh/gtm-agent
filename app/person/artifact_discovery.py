@@ -46,12 +46,16 @@ def artifact_queries(account_name: str, domain: str, signal_label: str) -> list[
     focus = terms[0]
     queries.extend(
         [
+            f'{account_name} "{focus}" engineering blog',
+            f'{account_name} "{focus}" architecture',
+            f'{account_name} "{focus}" conference',
+            f'{account_name} "{focus}" talk',
+            f'{account_name} "{focus}" interview',
+            f'site:{host} "{focus}"',
+            f'site:github.com "{account_name}" "{focus}"',
             f"{account_name} engineering blog {focus}",
             f"{account_name} conference {focus}",
-            f"{account_name} speaker {focus}",
             f"site:github.com {account_name} {focus}",
-            f"site:{host} {focus}",
-            f"{account_name} postmortem {focus}",
         ]
     )
     return queries

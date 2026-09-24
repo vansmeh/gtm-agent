@@ -239,12 +239,20 @@ class PersonHypothesis(BaseModel):
 
 
 class TechnicalArtifact(BaseModel):
-    source_url: str
+    id: str = ""
+    source_url: str = ""
+    url: str = ""
+    title: str = ""
     topic: str
-    author: str
+    author: str = ""
+    author_person_id: str = ""
+    company_id: str = ""
     published_at: date | None = None
-    evidence_id: str
-    kind: str
+    evidence_id: str = ""
+    evidence_ids: list[str] = Field(default_factory=list)
+    kind: str = "technical_article"
+    source_type: str = ""
+    source_quality: str = ""
 
 
 class EvidenceEdge(BaseModel):
@@ -284,6 +292,25 @@ class SearchExecution(BaseModel):
     result_count: int
     urls: list[str] = Field(default_factory=list)
     engines: list[str] = Field(default_factory=list)
+
+
+class SearchTrace(BaseModel):
+    provider: str
+    provider_mode: Literal["LIVE", "MOCK", "DEMO"] = "MOCK"
+    query: str
+    timestamp: datetime
+    result_count: int
+    result_url: str = ""
+    result_title: str = ""
+    result_snippet: str = ""
+    result_source: str = ""
+    search_latency_ms: float = 0.0
+
+
+class ArtifactPersonLink(BaseModel):
+    person_id: str
+    artifact_id: str
+    relationship: Literal["author", "speaker", "contributor", "interviewee", "mentioned_person"]
 
 
 class PersonSearchTrace(BaseModel):
@@ -397,7 +424,11 @@ class RunModel(BaseModel):
     deep_researched_count: int = 0
     queries_executed: int = 0
     results_examined: int = 0
+    search_mode: Literal["LIVE", "MOCK", "DEMO"] = "MOCK"
+    search_endpoint: str = ""
     search_log: list[SearchExecution] = Field(default_factory=list)
+    search_traces: list[SearchTrace] = Field(default_factory=list)
+    artifact_links: list[ArtifactPersonLink] = Field(default_factory=list)
     person_pages_used: int = 0
     person_outcome: Literal["verified_person", "weak_candidate", "no_verified_person"] = "no_verified_person"
     stop_research: bool = False

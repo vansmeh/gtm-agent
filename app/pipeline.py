@@ -17,7 +17,7 @@ from app.laya.llm import HttpLLMClient
 from app.persistence.store import Store
 from app.playbook.selection import Playbook, load_playbook
 from app.research.fetch import FixtureFetcher, HttpxPageFetcher
-from app.research.search import MockSearchProvider, SearXNGSearchProvider
+from app.research.search import DirectWebSearchProvider, MockSearchProvider, SearXNGSearchProvider, provider_mode
 from app.sheets.provider import SheetsProvider, build_sheets_provider
 
 PLAYBOOK_PATH = Path(__file__).resolve().parent.parent / "templates" / "playbook.json"
@@ -54,6 +54,7 @@ def execute_run(
         raise TypeError("fetcher is invalid")
     moment = observed_at or datetime.now(UTC)
     account_id = str(uuid.uuid4())
+    mode = provider_mode(search)
     run = RunModel(
         run_id=str(uuid.uuid4()),
         account_id=account_id,
@@ -69,6 +70,8 @@ def execute_run(
         verification_page_budget=settings.verification_page_budget,
         deep_query_budget=settings.deep_query_budget,
         deep_page_budget=settings.deep_page_budget,
+        search_mode=mode,  # type: ignore[arg-type]
+        search_endpoint=str(getattr(search, "endpoint", "")),
     )
     store = Store(session)
     store.create_account(account_id, account_name, domain, moment)
@@ -106,7 +109,7 @@ def run_acme_demo(
         settings=settings,
         account_name="Acme AI",
         domain="acme.example",
-        search=MockSearchProvider(DOCUMENTS),
+        search=MockSearchProvider(DOCUMENTS, mode="DEMO"),
         fetcher=FixtureFetcher(DOCUMENTS),
         sheets=board,
         kernel=default_kernel(settings.laya_mode),
@@ -118,6 +121,11 @@ def run_acme_demo(
 
 
 def default_providers(settings: Settings, http_client: object | None = None) -> tuple[object, object]:
+    if settings.search_provider == "direct":
+        return (
+            DirectWebSearchProvider(timeout=settings.search_timeout_seconds, budget=settings.search_budget),
+            HttpxPageFetcher(http_client) if http_client is not None else HttpxPageFetcher(_default_http_client()),
+        )
     if settings.search_provider == "searxng":
         return (
             SearXNGSearchProvider(

@@ -12,7 +12,7 @@ class Settings(BaseSettings):
 
     app_name: str = "redis-gtm-agent"
     database_url: str = "sqlite:///./data/gtm.db"
-    search_provider: Literal["mock", "searxng"] = "mock"
+    search_provider: Literal["mock", "searxng", "direct"] = "mock"
     searxng_base_url: str = Field(
         default="http://localhost:8080",
         validation_alias=AliasChoices("SEARXNG_URL", "SEARXNG_BASE_URL"),

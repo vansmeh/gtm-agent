@@ -174,6 +174,21 @@ class Store:
                     updated_at=opportunity.updated_at,
                 )
             )
+        for trace in run.search_traces:
+            self.session.add(
+                ResearchLogRow(
+                    id=str(uuid.uuid4()),
+                    run_id=run.run_id,
+                    created_at=trace.timestamp,
+                    node="search",
+                    cycle=run.cycle,
+                    message=(
+                        f"{trace.provider_mode} {trace.provider} q={trace.query} "
+                        f"n={trace.result_count} url={trace.result_url} source={trace.result_source} "
+                        f"latency_ms={trace.search_latency_ms:.0f}"
+                    ),
+                )
+            )
         for event in run.why_now:
             self.session.add(
                 WhyNowRow(

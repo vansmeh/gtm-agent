@@ -4,7 +4,7 @@ import re
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.domain.models import (
     Evidence,
@@ -16,6 +16,7 @@ from app.domain.models import (
     ResearchLogEntry,
     RunModel,
     SearchExecution,
+    SearchTrace,
     SnippetLead,
     TechnicalArtifact,
     TemplateChoice,
@@ -46,6 +47,7 @@ from app.person.artifact_discovery import (
     team_follow_up_queries,
     teams_in_text,
 )
+from app.person.attribution import build_artifacts
 from app.person.candidate_generation import extract_names, recall_queries
 from app.person.current_affiliation import (
     AffiliationResolution,
@@ -625,17 +627,26 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 )
             )
             people.append(record)
-        run.artifacts = [
-            TechnicalArtifact(
-                source_url=item.url,
-                topic=item.topic,
-                author=item.author,
-                published_at=item.published_at,
-                evidence_id=item.evidence_id,
-                kind=item.kind,
-            )
-            for item in artifacts_from_evidence(run.evidence, run.account_name)
-        ]
+        attributed, links = build_artifacts(
+            run.evidence, account_name=run.account_name, domain=run.domain
+        )
+        if attributed:
+            run.artifacts = attributed
+            run.artifact_links = links
+        else:
+            run.artifacts = [
+                TechnicalArtifact(
+                    source_url=item.url,
+                    url=item.url,
+                    topic=item.topic,
+                    author=item.author,
+                    published_at=item.published_at,
+                    evidence_id=item.evidence_id,
+                    evidence_ids=[item.evidence_id],
+                    kind=item.kind,
+                )
+                for item in artifacts_from_evidence(run.evidence, run.account_name)
+            ]
         signal_name = run.signals[0].label if run.signals else ""
         function_name = run.affected_functions[0] if run.affected_functions else ""
         run.ownership_links = [
@@ -747,6 +758,33 @@ def _note_search(run: RunModel, query: str, hits: Sequence[object]) -> None:
             engines=[hit.engine for hit in typed if hit.engine],
         )
     )
+    moment = datetime.now(UTC)
+    rows = typed or []
+    if not rows:
+        run.search_traces.append(
+            SearchTrace(
+                provider=run.search_endpoint or "unknown",
+                provider_mode=run.search_mode,
+                query=query,
+                timestamp=moment,
+                result_count=0,
+            )
+        )
+    for hit in rows:
+        run.search_traces.append(
+            SearchTrace(
+                provider=hit.provider or run.search_endpoint or "unknown",
+                provider_mode=run.search_mode,
+                query=query,
+                timestamp=moment,
+                result_count=len(rows),
+                result_url=hit.url,
+                result_title=hit.title,
+                result_snippet=hit.snippet,
+                result_source=hit.source or hit.engine,
+                search_latency_ms=hit.latency_ms,
+            )
+        )
 
 
 def _record_snippet_leads(run: RunModel, hits: Sequence[object], query: str) -> None:
