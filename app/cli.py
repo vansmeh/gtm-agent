@@ -16,45 +16,82 @@ from app.research.search import SearXNGSearchProvider
 from app.sheets.provider import build_sheets_provider
 
 
+def _person_why_now(run: RunModel, name: str, *, selected: bool) -> str:
+    named = [
+        item.excerpt
+        for item in run.evidence
+        if name in item.excerpt
+        and item.published_at is not None
+        and any(item.id in event.evidence_ids for event in run.why_now)
+    ]
+    if named:
+        return named[0]
+    if selected:
+        account = next((event.summary for event in run.why_now if event.event_type != "unknown"), "")
+        if account:
+            return account
+    return "unknown"
+
+
+def _fit_line(person: object) -> str:
+    from app.domain.models import PersonRecord
+
+    if not isinstance(person, PersonRecord) or person.fit is None:
+        return "not scored"
+    fit = person.fit
+    return (
+        f"role_relevance={fit.role_relevance} problem_ownership={fit.problem_ownership} "
+        f"technical_relevance={fit.technical_relevance} timing_relevance={fit.timing_relevance} "
+        f"public_evidence={fit.public_evidence} seniority={fit.seniority} "
+        f"contact_confidence={fit.contact_confidence}"
+    )
+
+
 def render_live_report(run: RunModel) -> str:
     rec = run.recommendation
     signal = run.signals[0].label if run.signals else "unknown"
     function = run.functions[0].label if run.functions else "unknown"
+    selected = next((person for person in run.people if person.selection_status == "verified_person"), None)
     lines = [
         f"ACCOUNT: {run.account_name}",
         f"TECHNICAL SIGNAL: {signal}",
         f"LIKELY FUNCTION: {function}",
-        "TOP PEOPLE:",
+        "CANDIDATE PEOPLE:",
     ]
     if not run.people:
-        lines.append("1. unknown")
-    for index, person in enumerate(run.people[:3], start=1):
-        fit = person.fit
-        evidence = [item.excerpt for item in run.evidence if person.name in item.excerpt][:3]
-        why_now = next((event.summary for event in run.why_now if event.event_type != "unknown"), "unknown")
-        if not any(event.event_type != "unknown" for event in run.why_now):
-            why_now = "unknown"
+        lines.append("none")
+    for person in run.people:
+        evidence_lines = [
+            f"- {item.source_url} | {item.excerpt}" for item in run.evidence if person.name in item.excerpt
+        ][:4]
+        if person.identity_excerpt and person.source_urls:
+            identity_line = f"- {person.source_urls[0]} | {person.identity_excerpt}"
+            if identity_line not in evidence_lines:
+                evidence_lines.insert(0, identity_line)
+        why = _person_why_now(run, person.name, selected=person.selection_status == "verified_person")
+        matter = "" if person.dossier is None else person.dossier.appears_to_own
+        contradictions = "; ".join(person.contradictions) if person.contradictions else "none"
         lines.extend(
             [
-                f"{index}. {person.name}",
-                f"WHY THIS PERSON: {'' if person.dossier is None else person.dossier.appears_to_own}",
+                f"NAME: {person.name}",
+                f"TITLE: {person.title or 'unknown'}",
+                f"WHY THEY MATTER: {matter}",
+                f"RESPONSIBILITY: {person.responsibility_status}",
+                f"PERSON/PROBLEM FIT: {_fit_line(person)}",
+                f"WHY NOW: {why}",
                 "EVIDENCE:",
-                *([f"- {item}" for item in evidence] or ["- none"]),
-                "PERSON/PROBLEM FIT: "
-                + (
-                    "not scored"
-                    if fit is None
-                    else (
-                        f"role_relevance={fit.role_relevance} problem_ownership={fit.problem_ownership} "
-                        f"technical_relevance={fit.technical_relevance} timing_relevance={fit.timing_relevance} "
-                        f"public_evidence={fit.public_evidence} seniority={fit.seniority} "
-                        f"contact_confidence={fit.contact_confidence}"
-                    )
+                *(evidence_lines or ["- none"]),
+                f"CONTRADICTIONS: {contradictions}",
+                (
+                    f"CONFIDENCE: identity={person.identity_confidence} "
+                    f"validity={person.validity} selection={person.selection_status}"
                 ),
-                f"WHY NOW: {why_now}",
-                f"CONFIDENCE: {person.identity_confidence}",
             ]
         )
+    if selected is None:
+        lines.append("FINAL: NO VERIFIED PERSON")
+    else:
+        lines.append(f"FINAL: SELECTED PERSON: {selected.name}")
     primary = next((item for item in run.opportunities if item.is_primary), None)
     lines.append(
         "REDIS HYPOTHESIS: "

@@ -243,3 +243,132 @@ def test_no_why_now_is_unknown(tmp_path: Path) -> None:
     run = _run(tmp_path, "old", NO_WHY)
     assert [event.event_type for event in run.why_now] == ["unknown"]
     assert run.why_now[0].evidence_ids == []
+
+
+TITLE_ONLY = [
+    _doc(
+        "https://northwind.example/about/leadership",
+        "Leadership",
+        "company_news",
+        "2026-08-01",
+        "Riley Chen, Head of Platform Engineering, is listed on the Northwind leadership page.",
+    ),
+    _doc(
+        "https://northwind.example/blog/search",
+        "Northwind launches search",
+        "blog",
+        "2026-08-02",
+        "Northwind launched Northwind Search. "
+        "The platform engineering organization owns the search serving path. "
+        "The post describes retrieval-augmented generation and low latency.",
+    ),
+]
+
+CONFLICTING_IDENTITY = [
+    _doc(
+        "https://northwind.example/blog/search",
+        "Northwind launches search",
+        "blog",
+        "2026-08-01",
+        "Northwind launched Northwind Search. "
+        "Ada Lovelace, Head of Platform Engineering, said the search serving path has to stay low latency. "
+        "The platform engineering organization owns the search serving path.",
+    ),
+    _doc(
+        "https://northwind.example/news/sales",
+        "Sales",
+        "company_news",
+        "2026-08-15",
+        "Ada Lovelace, VP Sales, welcomed customers at Northwind.",
+    ),
+]
+
+AMBIGUOUS = [
+    _doc(
+        "https://northwind.example/blog/search",
+        "Northwind launches search",
+        "blog",
+        "2026-08-01",
+        "Northwind launched Northwind Search and described retrieval and low latency. "
+        "Alex Lee, Director of Search, works at Contoso.",
+    ),
+]
+
+
+def test_exact_identity_match(tmp_path: Path) -> None:
+    run = _run(tmp_path, "identity", STRONG)
+    person = next(item for item in run.people if item.name == "Ada Lovelace")
+    assert person.company == "Northwind"
+    assert person.title
+    assert person.identity_excerpt
+    assert person.source_urls
+    assert person.identity_confidence >= 0.55
+    assert person.selection_status == "verified_person"
+    assert run.person_outcome == "verified_person"
+    assert run.recommendation is not None
+    assert run.recommendation.person == "Ada Lovelace"
+
+
+def test_ambiguous_person_is_rejected(tmp_path: Path) -> None:
+    run = _run(tmp_path, "ambiguous", AMBIGUOUS)
+    assert all(person.name != "Alex Lee" for person in run.people)
+    assert run.person_outcome == "no_verified_person"
+    assert run.recommendation is not None
+    assert run.recommendation.person == "unknown"
+
+
+def test_stale_role_is_not_selected(tmp_path: Path) -> None:
+    run = _run(tmp_path, "stale", NO_WHY)
+    person = next(item for item in run.people if item.name == "Ada Lovelace")
+    assert person.validity == "stale"
+    assert person.selection_status != "verified_person"
+    assert run.recommendation is not None
+    assert run.recommendation.person == "unknown"
+
+
+def test_title_without_responsibility_is_not_selected(tmp_path: Path) -> None:
+    run = _run(tmp_path, "title-only", WEAK)
+    person = next(item for item in run.people if item.name == "Grace Hopper")
+    assert person.responsibility_status == "unknown"
+    assert person.selection_status != "verified_person"
+    assert run.recommendation is not None
+    assert run.recommendation.person == "unknown"
+    assert run.recommendation.template_id is None
+
+
+def test_strong_role_and_strong_ownership(tmp_path: Path) -> None:
+    run = _run(tmp_path, "own-strong", STRONG)
+    person = next(item for item in run.people if item.name == "Ada Lovelace")
+    assert person.fit is not None
+    assert person.fit.role_relevance >= 0.9
+    assert person.fit.problem_ownership >= 0.6
+    assert person.responsibility_status in {"confirmed", "probable"}
+    assert person.selection_status == "verified_person"
+
+
+def test_strong_role_and_weak_ownership_is_not_selected(tmp_path: Path) -> None:
+    run = _run(tmp_path, "own-weak", TITLE_ONLY)
+    person = next(item for item in run.people if item.name == "Riley Chen")
+    assert person.fit is not None
+    assert person.fit.role_relevance >= 0.9
+    assert person.fit.problem_ownership <= 0.2
+    assert person.fit.seniority >= 0.8
+    assert person.selection_status != "verified_person"
+    assert run.recommendation is not None
+    assert run.recommendation.person == "unknown"
+
+
+def test_contradictory_identity_is_not_selected(tmp_path: Path) -> None:
+    run = _run(tmp_path, "identity-conflict", CONFLICTING_IDENTITY)
+    person = next(item for item in run.people if item.name == "Ada Lovelace")
+    assert person.contradictions
+    assert person.selection_status != "verified_person"
+    assert run.person_outcome != "verified_person"
+    assert run.recommendation is not None
+    assert run.recommendation.person == "unknown"
+
+
+def test_reposted_source_is_not_independent_corroboration(tmp_path: Path) -> None:
+    run = _run(tmp_path, "repost", DUPLICATE)
+    person = next(item for item in run.people if item.name == "Ada Lovelace")
+    assert not any(url.endswith("-repost") for url in person.source_urls)

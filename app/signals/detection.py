@@ -7,12 +7,15 @@ from app.domain.models import Evidence, TechnicalSignal
 _SIGNALS: tuple[tuple[str, str, str], ...] = (
     ("ai_search_launch", "AI search product launch", "ai_search"),
     ("rag_architecture", "Retrieval-augmented generation architecture", "rag"),
+    ("vector_search", "Vector search", "vector_search"),
     ("low_latency_serving", "Low-latency serving concern", "low_latency"),
     ("platform_hiring", "Platform engineering hiring", "hiring_platform"),
     ("ml_infrastructure_hiring", "ML infrastructure hiring", "hiring_ml"),
 )
 
-PROBLEM_SIGNAL_TYPES = frozenset({"ai_search_launch", "rag_architecture", "low_latency_serving"})
+PROBLEM_SIGNAL_TYPES = frozenset(
+    {"ai_search_launch", "rag_architecture", "low_latency_serving", "vector_search"}
+)
 
 
 def detect_signals(evidence: list[Evidence]) -> list[TechnicalSignal]:

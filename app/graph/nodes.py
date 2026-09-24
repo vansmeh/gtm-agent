@@ -16,13 +16,13 @@ from app.graph.state import GraphState, dump_run, load_run
 from app.laya.adapter import LayaAdapter
 from app.opportunity.redis_mapper import map_opportunities
 from app.opportunity.why_now import detect_why_now
-from app.person.discovery import discover_people
-from app.person.identity import merge_identities
+from app.person.discovery import discover_mentions
+from app.person.identity import identities_from_mentions, validity_for
 from app.person.person_account_fit import assess_fit
 from app.person.persona_mapping import map_persona
 from app.person.public_activity import collect_activity
-from app.person.ranking import build_dossier, explain_pair, rank_people
-from app.person.responsibility import extract_responsibilities
+from app.person.ranking import build_dossier, explain_pair, rank_people, selection_status_for
+from app.person.responsibility import classify_responsibility, extract_responsibilities
 from app.person.role import function_guess_from_title, seniority_from_title
 from app.person.technical_footprint import build_footprint
 from app.playbook.selection import (
@@ -31,7 +31,7 @@ from app.playbook.selection import (
     compatible_templates,
     render_template,
 )
-from app.research.bounds import evidence_is_sufficient, person_discovery_queries, queries_for
+from app.research.bounds import evidence_is_sufficient, person_discovery_queries, queries_for, source_rank
 from app.research.extract import extract_evidence, observation_from_page
 from app.research.fetch import PageFetcher
 from app.research.search import SearchProvider
@@ -49,6 +49,7 @@ class PipelineDeps:
     playbook: Playbook
     observed_at: datetime
     max_searches_per_cycle: int = 4
+    person_query_budget: int = 6
     search_provider_name: str = "mock"
 
 
@@ -73,13 +74,27 @@ def plan_search(state: GraphState) -> GraphState:
     return dump_run(run)
 
 
-def _ingest_page(run: RunModel, deps: PipelineDeps, url: str, published_hint: str | None = None) -> None:
+def _ingest_page(
+    run: RunModel,
+    deps: PipelineDeps,
+    url: str,
+    published_hint: str | None = None,
+    *,
+    person_slot: bool = False,
+) -> None:
     from datetime import date
 
-    if url in run.fetched_urls or len(run.fetched_urls) >= run.max_pages:
+    if url in run.fetched_urls:
+        return
+    if person_slot:
+        if run.person_pages_used >= run.person_page_budget:
+            return
+    elif len(run.fetched_urls) >= run.max_pages:
         return
     page = deps.fetcher.fetch(url)
     run.fetched_urls.append(url)
+    if person_slot:
+        run.person_pages_used += 1
     if page.status != "ok":
         _log(run, "fetch", f"Skipped {url}: {page.status} {page.error}")
         return
@@ -106,9 +121,8 @@ def _search_and_fetch(run: RunModel, deps: PipelineDeps) -> None:
         return
     queries = queries_for(run.account_name, run.cycle)[: deps.max_searches_per_cycle]
     for query in queries:
-        reserved_for_people = 3 if run.cycle == 1 else 0
-        if len(run.fetched_urls) >= max(1, run.max_pages - reserved_for_people):
-            _log(run, "search", "Page budget reached. Remaining pages are reserved for person research.")
+        if len(run.fetched_urls) >= run.max_pages:
+            _log(run, "search", "Account page budget reached.")
             break
         hits = deps.search.search(query, limit=4)
         _log(run, "search", f"Query {query!r} returned {len(hits)} hits.")
@@ -164,41 +178,68 @@ def research_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
     def node(state: GraphState) -> GraphState:
         run = load_run(state)
         function_label = run.functions[0].label if run.functions else ""
-        signal_label = run.signals[0].label if run.signals else ""
-        for query in person_discovery_queries(run.account_name, run.domain, function_label, signal_label)[:3]:
-            if len(run.fetched_urls) >= run.max_pages:
-                break
-            hits = deps.search.search(query, limit=3)
+        signal_label = " ".join(item.label for item in run.signals[:2]) or "technical"
+        queries = person_discovery_queries(
+            run.account_name, run.domain, function_label, signal_label
+        )[: deps.person_query_budget]
+        collected: list[tuple[int, str, str | None]] = []
+        seen_hits: set[str] = set()
+        for query in queries:
+            hits = deps.search.search(query, limit=4)
             _log(run, "people", f"Person discovery query {query!r} returned {len(hits)} hits.")
             for hit in hits:
-                if hit.url in run.fetched_urls or len(run.fetched_urls) >= run.max_pages:
+                if hit.url in seen_hits:
                     continue
-                _ingest_page(run, deps, hit.url)
-        mentions = discover_people(run.evidence)
-        for name, _title, _url in mentions[:4]:
-            if len(run.fetched_urls) >= run.max_pages:
+                seen_hits.add(hit.url)
+                collected.append((source_rank(hit.url, run.domain), hit.url, hit.published_at))
+        collected.sort(key=lambda item: item[0])
+        for _rank, url, published in collected:
+            if run.person_pages_used >= run.person_page_budget:
                 break
-            follow = deps.search.search(f"{name} {run.account_name}", limit=2)
-            for hit in follow:
-                if hit.url in run.fetched_urls or len(run.fetched_urls) >= run.max_pages:
-                    continue
-                _ingest_page(run, deps, hit.url)
-        mentions = discover_people(run.evidence)
+            _ingest_page(run, deps, url, published, person_slot=True)
+        observed_on = run.observed_at.date()
+        mentions = discover_mentions(run.observations, run.account_name)
+        for mention in mentions[:3]:
+            if run.person_pages_used >= run.person_page_budget:
+                break
+            follow = deps.search.search(f"{mention.name} {run.account_name}", limit=3)
+            _log(run, "people", f"Verification query for {mention.name} returned {len(follow)} hits.")
+            for hit in follow[:2]:
+                _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
+        mentions = discover_mentions(run.observations, run.account_name)
+        if mentions:
+            lead = mentions[0].name
+            check = deps.search.search(f"{lead} {run.account_name} former OR previously", limit=3)
+            _log(run, "people", f"Contradiction check for {lead} returned {len(check)} hits.")
+            for hit in check[:1]:
+                _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
+            mentions = discover_mentions(run.observations, run.account_name)
         people: list[PersonRecord] = []
-        for name, title, urls, confidence in merge_identities(mentions):
+        for identity in identities_from_mentions(mentions, run.account_name, observed_on=observed_on):
+            status, responsibility_lines = classify_responsibility(
+                identity.name, identity.title, run.evidence, function_label
+            )
             record = PersonRecord(
                 id=str(uuid.uuid4()),
-                name=name,
-                title=title,
-                identity_confidence=confidence,
-                source_urls=urls,
-                seniority=seniority_from_title(title),
-                function_guess=function_guess_from_title(title),
-                responsibilities=extract_responsibilities(name, run.evidence),
-                activity=collect_activity(name, run.observations, run.evidence),
-                footprint_topics=build_footprint(name, run.evidence, run.observations),
+                name=identity.name,
+                title=identity.title,
+                company=identity.company,
+                identity_excerpt=identity.excerpt,
+                identity_confidence=identity.confidence,
+                responsibility_status=status,  # type: ignore[arg-type]
+                first_seen=identity.first_seen,
+                last_seen=identity.last_seen,
+                role_published_at=identity.role_published_at,
+                validity=validity_for(identity.last_seen, observed_on=observed_on),  # type: ignore[arg-type]
+                contradictions=identity.contradictions,
+                source_urls=identity.urls,
+                seniority=seniority_from_title(identity.title),
+                function_guess=function_guess_from_title(identity.title),
+                responsibilities=responsibility_lines or extract_responsibilities(identity.name, run.evidence),
+                activity=collect_activity(identity.name, run.observations, run.evidence),
+                footprint_topics=build_footprint(identity.name, run.evidence, run.observations),
                 authored_urls=[],
-                persona_id=map_persona(title, deps.playbook),
+                persona_id=map_persona(identity.title, deps.playbook),
             )
             record.authored_urls = [item.url for item in record.activity if item.authored]
             people.append(record)
@@ -220,6 +261,15 @@ def match_people(state: GraphState) -> GraphState:
             observed_on=observed_on,
             window_days=180,
         )
+        person.selection_status = selection_status_for(person)  # type: ignore[assignment]
+    verified = [person for person in run.people if person.selection_status == "verified_person"]
+    weak = [person for person in run.people if person.selection_status == "weak_candidate"]
+    if verified:
+        run.person_outcome = "verified_person"
+    elif weak:
+        run.person_outcome = "weak_candidate"
+    else:
+        run.person_outcome = "no_verified_person"
     run.people = rank_people(run.people)
     problem = strongest_problem(run.signals)
     label = problem.label if problem else ""
@@ -255,7 +305,7 @@ def map_redis(state: GraphState) -> GraphState:
 def select_templates(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
     def node(state: GraphState) -> GraphState:
         run = load_run(state)
-        person = run.people[0] if run.people else None
+        person = next((item for item in run.people if item.selection_status == "verified_person"), None)
         signals = {item.signal_type for item in run.signals}
         timings = {item.event_type for item in run.why_now}
         persona = None if person is None else person.persona_id
@@ -304,8 +354,9 @@ def _evidence_by_id(run: RunModel) -> dict[str, object]:
 def recommend(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
     def node(state: GraphState) -> GraphState:
         run = load_run(state)
-        person = run.people[0] if run.people else None
-        runner = run.people[1] if len(run.people) > 1 else None
+        person = next((item for item in run.people if item.selection_status == "verified_person"), None)
+        others = [item for item in run.people if person is None or item.id != person.id]
+        runner = others[0] if others else None
         problem = strongest_problem(run.signals)
         primary = next((item for item in run.opportunities if item.is_primary), None)
         by_id = {item.id: item for item in run.evidence}
@@ -332,14 +383,14 @@ def recommend(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
         if primary is None:
             hypothesis = "No Redis use case was mapped."
         else:
-            others = [
+            mappings = [
                 f"{item.use_case_id}={item.relevance}"
                 for item in run.opportunities
                 if item.id != primary.id
             ]
             hypothesis = (
                 f"{primary.name} is {primary.relevance}. {primary.hypothesis} "
-                f"Falsifier: {primary.falsifier} Other mappings: {', '.join(others)}."
+                f"Falsifier: {primary.falsifier} Other mappings: {', '.join(mappings)}."
             )
         fit = None if person is None else person.fit
         ready = (

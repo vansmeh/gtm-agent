@@ -15,6 +15,28 @@ def _key(fit: PersonFit) -> tuple[float, ...]:
     return tuple(getattr(fit, name) for name in _PRIMARY)
 
 
+def selection_status_for(person: PersonRecord) -> str:
+    """Verified only when identity, role, responsibility, and the problem link all hold."""
+    fit = person.fit
+    identity_ok = (
+        person.identity_confidence >= 0.55
+        and bool(person.company)
+        and bool(person.title)
+        and bool(person.identity_excerpt)
+        and bool(person.source_urls)
+        and person.name in person.identity_excerpt
+    )
+    if person.contradictions or not identity_ok:
+        return "rejected" if person.contradictions else "weak_candidate"
+    if person.validity == "stale":
+        return "weak_candidate"
+    responsibility_ok = person.responsibility_status in {"confirmed", "probable"}
+    connection_ok = fit is not None and fit.problem_ownership >= 0.6
+    if responsibility_ok and connection_ok and person.validity == "current":
+        return "verified_person"
+    return "weak_candidate"
+
+
 def rank_people(people: list[PersonRecord]) -> list[PersonRecord]:
     def sort_key(person: PersonRecord) -> tuple[float, ...]:
         if person.fit is None:

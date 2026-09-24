@@ -38,7 +38,15 @@ _RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("ownership_platform", re.compile(r"platform engineering.{0,80}(owns|responsible)", re.I)),
     ("reports_platform", re.compile(r"reports to the Head of Platform Engineering", re.I)),
     ("feature_pipeline", re.compile(r"feature pipelines", re.I)),
-    ("person_mention", re.compile(r"\b[A-Z][a-z]+ [A-Z][a-z]+,\s+(?:Head of|VP|Vice President|Director of)\b")),
+    (
+        "person_mention",
+        re.compile(
+            r"\b[A-Z][a-z]+ [A-Z][a-z]+(?:,| is)\s+(?:the |a )?"
+            r"(?:Head of|VP|Vice President|Director of|Chief|Founder|Principal|Staff|Distinguished|Architect)\b",
+            re.I,
+        ),
+    ),
+    ("vector_search", re.compile(r"vector search", re.I)),
 )
 
 

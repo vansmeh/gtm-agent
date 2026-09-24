@@ -12,5 +12,7 @@ def isolated_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         "MAX_RESEARCH_CYCLES",
         "SEARCH_BUDGET",
         "SEARCH_TIMEOUT_SECONDS",
+        "PERSON_PAGE_BUDGET",
+        "PERSON_QUERY_BUDGET",
     ):
         monkeypatch.delenv(key, raising=False)

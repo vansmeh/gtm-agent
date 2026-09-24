@@ -97,7 +97,16 @@ class PersonRecord(BaseModel):
     id: str
     name: str
     title: str
+    company: str = ""
+    identity_excerpt: str = ""
     identity_confidence: float
+    responsibility_status: Literal["confirmed", "probable", "unknown"] = "unknown"
+    selection_status: Literal["verified_person", "weak_candidate", "rejected"] = "weak_candidate"
+    first_seen: date | None = None
+    last_seen: date | None = None
+    role_published_at: date | None = None
+    validity: Literal["current", "stale", "unknown"] = "unknown"
+    contradictions: list[str] = Field(default_factory=list)
     source_urls: list[str]
     seniority: float
     function_guess: str | None
@@ -207,6 +216,9 @@ class RunModel(BaseModel):
     cycle: int = 0
     max_cycles: int = 3
     max_pages: int = 8
+    person_page_budget: int = 6
+    person_pages_used: int = 0
+    person_outcome: Literal["verified_person", "weak_candidate", "no_verified_person"] = "no_verified_person"
     stop_research: bool = False
     fetched_urls: list[str] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)

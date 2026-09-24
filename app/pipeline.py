@@ -62,6 +62,7 @@ def execute_run(
         observed_at=moment,
         max_cycles=settings.max_research_cycles,
         max_pages=settings.max_pages_per_run,
+        person_page_budget=settings.person_page_budget,
     )
     store = Store(session)
     store.create_account(account_id, account_name, domain, moment)
@@ -73,6 +74,7 @@ def execute_run(
         playbook=playbook,
         observed_at=moment,
         max_searches_per_cycle=settings.max_searches_per_cycle,
+        person_query_budget=settings.person_query_budget,
         search_provider_name=settings.search_provider,
     )
     graph = build_graph(deps)
