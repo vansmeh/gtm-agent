@@ -256,6 +256,8 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
         )[: deps.discovery_query_budget]
         if run.affected_functions:
             queries = recall_queries(run.account_name, run.domain, run.affected_functions) + queries
+        elif run.evidence:
+            queries = recall_queries(run.account_name, run.domain, ["engineering"]) + queries
         elif run.signals:
             queries = artifact_queries(run.account_name, run.domain, signal_label)[:6] + queries
         collected: list[tuple[int, str, str | None]] = []

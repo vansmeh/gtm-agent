@@ -30,6 +30,17 @@ def test_byline_and_speaker() -> None:
     assert speakers[0].tier == "tier_3"
 
 
+def test_navigation_headings_are_not_people() -> None:
+    hits = [
+        _hit("Reference Architectures", "Cloudflare reference architectures.", "https://developers.cloudflare.com/reference-architecture/"),
+        _hit("Careers", "Open Positions at Cloudflare.", "https://www.cloudflare.com/careers/jobs/"),
+        _hit("Now Hiring", "Now Hiring infrastructure engineers.", "https://www.indeed.com/cloudflare"),
+    ]
+    kept, _raw, rejected, _duplicates = extract_names(hits, "Cloudflare", "cloudflare.com")
+    assert kept == []
+    assert rejected >= 1
+
+
 def test_generic_heading_title_and_github_username_are_rejected() -> None:
     heading = _hit("Full Stack", "Full Stack Software Engineer interviews at Stripe.", "https://github.com/x/stripe-interview")
     title_only = _hit("Platform Engineer", "Platform Engineer at Stripe.", "https://stripe.com/jobs/platform")
