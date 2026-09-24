@@ -1,7 +1,7 @@
 """Pipeline nodes. Each one reads evidence already on the run and writes structured results."""
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -11,6 +11,8 @@ from app.domain.models import (
     Recommendation,
     ResearchLogEntry,
     RunModel,
+    SearchExecution,
+    SnippetLead,
     TemplateChoice,
 )
 from app.graph.state import GraphState, dump_run, load_run
@@ -39,6 +41,7 @@ from app.person.public_activity import collect_activity
 from app.person.ranking import build_dossier, explain_pair, rank_people, selection_status_for
 from app.person.responsibility import classify_responsibility, extract_responsibilities
 from app.person.role import function_guess_from_title, seniority_from_title
+from app.person.snippets import candidates_from_hits
 from app.person.technical_footprint import build_footprint
 from app.playbook.selection import (
     Playbook,
@@ -140,6 +143,8 @@ def _search_and_fetch(run: RunModel, deps: PipelineDeps) -> None:
             _log(run, "search", "Account page budget reached.")
             break
         hits = deps.search.search(query, limit=4)
+        _note_search(run, query, hits)
+        _record_snippet_leads(run, hits, query)
         _log(run, "search", f"Query {query!r} returned {len(hits)} hits.")
         for hit in hits:
             _ingest_page(run, deps, hit.url, hit.published_at)
@@ -210,6 +215,8 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
         seen_hits: set[str] = set()
         for query in queries:
             hits = deps.search.search(query, limit=4)
+            _note_search(run, query, hits)
+            _record_snippet_leads(run, hits, query)
             _log(run, "people", f"Person discovery query {query!r} returned {len(hits)} hits.")
             run.person_traces.append(
                 PersonSearchTrace(
@@ -231,6 +238,8 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 break
             _ingest_page(run, deps, url, published, person_slot=True)
         observed_on = run.observed_at.date()
+        mentions = discover_mentions(run.observations, run.account_name)
+        _verify_snippet_leads(run, deps, mentions)
         mentions = discover_mentions(run.observations, run.account_name)
         topic = signal_label or "architecture"
         followed = 0
@@ -259,32 +268,41 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     )
                 )
                 continue
-            stages = (
-                footprint_queries(mention.name, run.account_name, topic)[:1]
-                + trigger_queries(mention.name, run.account_name)[:1]
+            stages = footprint_queries(mention.name, run.account_name, topic) + trigger_queries(
+                mention.name, run.account_name
             )
-            for query in stages:
-                if run.person_pages_used >= run.person_page_budget:
-                    break
+            fetched_followups = 0
+            for index, query in enumerate(stages):
                 follow = deps.search.search(query, limit=4)
+                _note_search(run, query, follow)
                 run.person_traces.append(
                     PersonSearchTrace(
                         query=query,
                         candidate=mention.name,
                         source=mention.url,
                         finding=f"{len(follow)} follow-up hits",
-                        decision="accept",
-                        reason="identity passed; checking technical footprint and a person-specific trigger",
+                        decision="accept" if follow else "reject",
+                        reason="checking technical footprint and a person-specific trigger",
                     )
                 )
+                # The first footprint query and the first trigger query may fetch.
+                # Later queries are stored. Extra pages stay inside the person budget.
+                may_fetch = index in {0, len(footprint_queries(mention.name, run.account_name, topic))}
+                if not may_fetch or run.person_pages_used >= run.person_page_budget or fetched_followups >= 4:
+                    continue
                 fresh = [hit for hit in follow if hit.url not in run.fetched_urls]
                 for hit in fresh[:2]:
+                    if run.person_pages_used >= run.person_page_budget or fetched_followups >= 4:
+                        break
                     _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
+                    fetched_followups += 1
             followed += 1
         mentions = discover_mentions(run.observations, run.account_name)
         if mentions:
             lead = mentions[0].name
-            check = deps.search.search(f"{lead} {run.account_name} former OR previously", limit=3)
+            check_query = f"{lead} {run.account_name} former OR previously"
+            check = deps.search.search(check_query, limit=3)
+            _note_search(run, check_query, check)
             _log(run, "people", f"Contradiction check for {lead} returned {len(check)} hits.")
             for hit in check[:1]:
                 _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
@@ -342,6 +360,82 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
         return dump_run(run)
 
     return node
+
+
+def _note_search(run: RunModel, query: str, hits: Sequence[object]) -> None:
+    from app.research.search import SearchHit
+
+    typed = [hit for hit in hits if isinstance(hit, SearchHit)]
+    run.queries_executed += 1
+    run.results_examined += len(typed)
+    run.search_log.append(SearchExecution(query=query, result_count=len(typed), urls=[hit.url for hit in typed]))
+
+
+def _record_snippet_leads(run: RunModel, hits: Sequence[object], query: str) -> None:
+    from app.research.search import SearchHit
+
+    typed = [hit for hit in hits if isinstance(hit, SearchHit)]
+    for mention in candidates_from_hits(typed, run.account_name, query):
+        if any(lead.name == mention.name and lead.url == mention.url for lead in run.snippet_leads):
+            continue
+        run.snippet_leads.append(
+            SnippetLead(
+                name=mention.name,
+                title=mention.title,
+                url=mention.url,
+                excerpt=mention.excerpt,
+                query=query,
+            )
+        )
+        run.person_traces.append(
+            PersonSearchTrace(
+                query=query,
+                candidate=mention.name,
+                source=mention.url,
+                finding=mention.excerpt[:180],
+                decision="accept",
+                reason="snippet names the person, company, and role; identity is not verified yet",
+            )
+        )
+
+
+def _verify_snippet_leads(run: RunModel, deps: PipelineDeps, mentions: Sequence[object]) -> None:
+    known = {getattr(mention, "name", "") for mention in mentions}
+    for lead in run.snippet_leads:
+        if lead.name in known:
+            continue
+        if run.person_pages_used >= run.person_page_budget:
+            run.person_traces.append(
+                PersonSearchTrace(
+                    query=lead.query,
+                    candidate=lead.name,
+                    source=lead.url,
+                    finding=lead.title,
+                    decision="reject",
+                    reason="snippet candidate was not fetched from an independent source before the page budget ended",
+                )
+            )
+            continue
+        query = f'"{lead.name}" {run.account_name}'
+        hits = deps.search.search(query, limit=3)
+        _note_search(run, query, hits)
+        fresh = [hit for hit in hits if hit.url not in run.fetched_urls and hit.url != lead.url]
+        for hit in fresh[:2]:
+            _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
+        run.person_traces.append(
+            PersonSearchTrace(
+                query=query,
+                candidate=lead.name,
+                source=lead.url,
+                finding=f"{len(fresh)} independent hits",
+                decision="accept" if fresh else "reject",
+                reason=(
+                    "searching an independent source for the snippet candidate"
+                    if fresh
+                    else "no independent public page was found for the snippet candidate"
+                ),
+            )
+        )
 
 
 def verify_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:

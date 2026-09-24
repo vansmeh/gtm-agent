@@ -123,4 +123,4 @@ def _confidence(urls: list[str], titles: list[str], excerpt: str) -> float:
         return 0.0
     if len(urls) >= 2:
         return 0.8
-    return 0.62
+    return 0.5

@@ -39,12 +39,23 @@ def test_signal_maps_to_several_functions() -> None:
             assert role in hypothesis.candidate_role_families
 
 
+def test_footprint_and_trigger_queries_cover_public_topics() -> None:
+    from app.opportunity.person_opportunity import footprint_queries, trigger_queries
+
+    footprint = footprint_queries("Alex Rivera", "Contoso", "search")
+    triggers = trigger_queries("Alex Rivera", "Contoso")
+    for topic in ("RAG", "search", "vector", "infrastructure", "platform", "latency", "distributed systems"):
+        assert any(topic in query and "Alex Rivera" in query and "Contoso" in query for query in footprint)
+    for trigger in ("promotion", "new role", "technical talk", "article", "hiring", "architecture"):
+        assert any(trigger in query and "Alex Rivera" in query for query in triggers)
+
+
 def test_discovery_queries_prefer_technical_sources() -> None:
     queries = person_discovery_queries("Redis", "redis.io", "Search", "vector search")
-    assert "blog" in queries[0]
-    assert "speaker" in queries[1]
+    assert any("conference" in query for query in queries)
+    assert any("speaker" in query for query in queries)
     assert any("github.com" in query for query in queries)
-    assert any("staff" in query for query in queries)
+    assert any("architect" in query for query in queries)
     assert not queries[0].startswith("site:redis.io team")
     assert source_rank("https://redis.io/blog/vector-search/", "redis.io") < source_rank(
         "https://redis.io/company/team/someone/", "redis.io"

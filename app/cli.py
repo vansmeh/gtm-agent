@@ -54,7 +54,7 @@ def render_live_report(run: RunModel) -> str:
     selected = next((person for person in run.people if person.selection_status == "verified_person"), None)
     lines = [
         f"ACCOUNT: {run.account_name}",
-        f"TECHNICAL SIGNAL: {signal}",
+        "TECHNICAL SIGNALS: " + (", ".join(item.label for item in run.signals) or signal),
         f"LIKELY FUNCTION: {function}",
         "LIKELY FUNCTIONS: "
         + (
@@ -64,6 +64,11 @@ def render_live_report(run: RunModel) -> str:
             or ", ".join(item.label for item in run.functions)
             or function
         ),
+        f"QUERIES EXECUTED: {run.queries_executed}",
+        f"SEARCH RESULTS EXAMINED: {run.results_examined}",
+        f"POTENTIAL NAMES DISCOVERED: {len({lead.name for lead in run.snippet_leads})}",
+        "QUERIES:",
+        "PERSON-SPECIFIC EVIDENCE:",
         "PERSON SEARCH TRACE:",
         "CANDIDATES DISCOVERED: "
         + str(len({trace.candidate for trace in run.person_traces if trace.candidate}) or len(run.people)),
@@ -77,8 +82,18 @@ def render_live_report(run: RunModel) -> str:
         "CANDIDATES VERIFIED: "
         + str(len([person for person in run.people if person.selection_status == "verified_person"])),
         f"PERSONOPPORTUNITIES: {len(run.person_opportunities)}",
-        "PERSON OPPORTUNITIES:",
+        "VERIFIED PEOPLE:",
     ]
+    query_at = lines.index("QUERIES:") + 1
+    query_lines = [f"- {item.query} ({item.result_count} results)" for item in run.search_log] or ["- none"]
+    lines[query_at:query_at] = query_lines
+    evidence_at = lines.index("PERSON-SPECIFIC EVIDENCE:") + 1
+    named_evidence = [
+        f"- {item.source_url} | {item.excerpt}"
+        for item in run.evidence
+        if any(person.name in item.excerpt for person in run.people)
+    ]
+    lines[evidence_at:evidence_at] = named_evidence[:8] or ["- none"]
     trace_at = lines.index("PERSON SEARCH TRACE:") + 1
     trace_lines = [
         f"- query={trace.query or '-'} candidate={trace.candidate or '-'} "
@@ -86,10 +101,12 @@ def render_live_report(run: RunModel) -> str:
         for trace in run.person_traces
     ] or ["- none"]
     lines[trace_at:trace_at] = trace_lines
-    if not run.person_opportunities:
+    verified_ids = {person.id for person in run.people if person.selection_status == "verified_person"}
+    verified_rows = [row for row in run.person_opportunities if row.person_id in verified_ids]
+    if not verified_rows:
         lines.append("none")
     evidence_by_id = {item.id: item for item in run.evidence}
-    for row in run.person_opportunities:
+    for row in verified_rows:
         person = next((item for item in run.people if item.id == row.person_id), None)
         kind = {
             "problem_owner": "PROBLEM OWNER",
@@ -112,10 +129,11 @@ def render_live_report(run: RunModel) -> str:
             [
                 f"NAME: {row.person_name}",
                 f"TITLE: {row.person_title or 'unknown'}",
-                f"ROLE IN THREAD: {kind}",
+                f"ROLE / RESPONSIBILITY: {row.person_title or 'unknown'} ({kind})",
                 f"WHY THIS PERSON: {row.angle}",
                 f"TECHNICAL FOOTPRINT: {footprint}",
-                f"PERSON/PROBLEM FIT: {fit}",
+                f"PERSON ↔ PROBLEM FIT: {fit}",
+                f"PERSON-SPECIFIC TRIGGER: {row.why_now}",
                 f"WHY NOW: {row.why_now}",
                 f"CONTACTABILITY: {row.contactability.level}",
                 f"REDIS HYPOTHESIS: {row.redis_hypothesis or 'none'}",

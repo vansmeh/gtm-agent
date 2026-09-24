@@ -30,15 +30,20 @@ def person_discovery_queries(
     function = function_label or "engineering"
     host = domain or account_name
     topic = _topic_phrase(signal_label, function)
+    title = _title_for_function(function)
     return [
-        f"{account_name} {topic} blog",
-        f"{account_name} conference speaker {topic}",
-        f"{account_name} {topic} interview",
-        f"site:github.com {account_name} {topic}",
-        f"site:{host} {topic}",
-        f"{account_name} staff engineer {topic}",
-        f"{account_name} principal {function}",
-        f"{account_name} architect {topic}",
+        f'"{account_name}" "{function}"',
+        f'"{account_name}" "{title}"',
+        f'"{account_name}" "{topic}"',
+        f'"{account_name}" engineer "{topic}"',
+        f'"{account_name}" architect "{topic}"',
+        f'"{account_name}" conference "{topic}"',
+        f'"{account_name}" speaker "{topic}"',
+        f"site:{host} {title}",
+        f'site:github.com "{account_name}" "{topic}"',
+        f"{account_name} engineering blog {topic}",
+        f"{account_name} podcast {topic}",
+        f"{account_name} technical talk {topic}",
     ]
 
 

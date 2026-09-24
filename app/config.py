@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     max_searches_per_cycle: int = 4
     max_pages_per_run: int = 8
     person_page_budget: int = 6
-    person_query_budget: int = 6
+    person_query_budget: int = 10
     why_now_window_days: int = 180
 
 

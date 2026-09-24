@@ -71,18 +71,41 @@ def hypothesis_queries(account_name: str, hypotheses: list[PersonHypothesis]) ->
     return queries
 
 
+_FOOTPRINT_TOPICS = (
+    "RAG",
+    "search",
+    "vector",
+    "infrastructure",
+    "platform",
+    "latency",
+    "distributed systems",
+)
+_TRIGGERS = (
+    "promotion",
+    "new role",
+    "new team",
+    "new initiative",
+    "technical talk",
+    "article",
+    "hiring",
+    "architecture",
+)
+
+
 def footprint_queries(name: str, account_name: str, topic: str) -> list[str]:
     focus = topic or "architecture"
-    return [
-        f"\"{name}\" {account_name} {focus}",
-        f"\"{name}\" {account_name} architecture",
-        f"\"{name}\" {account_name} conference",
-        f"\"{name}\" github",
-    ]
+    queries = [f'"{name}" "{account_name}" {focus}']
+    for item in _FOOTPRINT_TOPICS:
+        query = f'"{name}" "{account_name}" {item}'
+        if query not in queries:
+            queries.append(query)
+    queries.append(f'"{name}" "{account_name}" architecture')
+    queries.append(f'"{name}" github')
+    return queries
 
 
 def trigger_queries(name: str, account_name: str) -> list[str]:
-    return [f"\"{name}\" {account_name} talk OR article OR launch OR hiring OR promotion"]
+    return [f'"{name}" "{account_name}" {item}' for item in _TRIGGERS]
 
 
 def c_suite_without_specialist_role(title: str) -> bool:
