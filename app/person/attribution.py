@@ -146,7 +146,7 @@ def build_artifacts(
         if not _about_company(item, account_name, domain):
             continue
         named = attributions_in(item.excerpt, item.source_url)
-        if not named:
+        if not named and not _technical_document(item):
             continue
         artifact_id = item.id
         author = next((name for name, rel in named if rel in _STRONG), "")
@@ -182,6 +182,26 @@ def build_artifacts(
                 )
             )
     return artifacts, links
+
+
+def _technical_document(item: Evidence) -> bool:
+    if item.source_type in {
+        "engineering_blog",
+        "technical_article",
+        "conference_talk",
+        "conference_bio",
+        "interview",
+        "github",
+        "documentation",
+        "architecture_post",
+        "incident_postmortem",
+        "job_posting",
+        "conference",
+        "blog",
+    }:
+        return True
+    url = item.source_url.lower()
+    return any(part in url for part in ("/blog", "/engineering", "github.com", "/talk", "/speaker"))
 
 
 def _about_company(item: Evidence, account_name: str, domain: str) -> bool:
