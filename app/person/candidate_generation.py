@@ -176,6 +176,57 @@ _COMMON = frozenset(
         "infrastructure",
         "platform",
         "engineering",
+        "compliance",
+        "fail",
+        "small",
+        "project",
+        "glasswing",
+        "hot",
+        "module",
+        "replacement",
+        "buy",
+        "domains",
+        "actors",
+        "risk",
+        "who",
+        "subpoena",
+        "bug",
+        "bash",
+        "round",
+        "scope",
+        "industry",
+        "leaders",
+        "elegant",
+        "puzzle",
+        "south",
+        "san",
+        "francisco",
+        "beat",
+        "either",
+        "rails",
+        "administrative",
+        "assistant",
+        "commerce",
+        "components",
+        "modern",
+        "exteriors",
+        "agentic",
+        "storefronts",
+        "announces",
+        "multi",
+        "intern",
+        "microsite",
+        "make",
+        "money",
+        "elasticsearch",
+        "georgia",
+        "scales",
+        "exponentially",
+        "practical",
+        "reason",
+        "chief",
+        "executive",
+        "officer",
     }
 )
 _GENERIC = frozenset(
@@ -366,6 +417,8 @@ def _nearby_title(text: str, name: str) -> str:
 def _reject_name(name: str, url: str, kind: str, account: str) -> str:
     parts = name.split()
     lowered = [part.lower() for part in parts]
+    if len(set(lowered)) < 2:
+        return "generic heading"
     if len(parts) < 2 or any(part in _GENERIC or part in _COMMON or part == account for part in lowered):
         return "generic heading"
     if kind == "bare" and "github.com" in url:

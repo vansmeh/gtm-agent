@@ -30,6 +30,13 @@ def test_byline_and_speaker() -> None:
     assert speakers[0].tier == "tier_3"
 
 
+def test_prose_name_is_kept_and_heading_pair_is_not() -> None:
+    person = _hit("Blog", "James Larisch described distributed systems at Cloudflare.", "https://blog.cloudflare.com/crlite")
+    heading = _hit("Post", "Fail Small in production at Cloudflare.", "https://blog.cloudflare.com/orange")
+    kept, _raw, _rejected, _duplicates = extract_names([person, heading], "Cloudflare", "cloudflare.com")
+    assert [item.name for item in kept] == ["James Larisch"]
+
+
 def test_title_case_headings_are_not_people() -> None:
     hit = _hit("Introducing Meerkat", "Cloudflare distributed systems.", "https://blog.cloudflare.com/meerkat")
     kept, _raw, _rejected, _duplicates = extract_names([hit], "Cloudflare", "cloudflare.com")
