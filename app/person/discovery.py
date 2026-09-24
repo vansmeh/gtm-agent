@@ -6,7 +6,7 @@ from app.domain.models import Evidence
 
 _PERSON = re.compile(
     r"\b([A-Z][a-z]+ [A-Z][a-z]+),?\s+"
-    r"((?:Head of|VP|Vice President of|Director of) [A-Z][^,.]{2,80})"
+    r"((?:Head of|VP|Vice President of|Director of|Chief|CEO|CTO|Founder)(?: [A-Z][^,.]{2,80})?)"
 )
 _BLOCK = frozenset(
     {"acme", "search", "platform", "engineering", "infrastructure", "machine", "learning", "redis"}

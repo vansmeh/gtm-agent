@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,7 +13,13 @@ class Settings(BaseSettings):
     app_name: str = "redis-gtm-agent"
     database_url: str = "sqlite:///./data/gtm.db"
     search_provider: Literal["mock", "searxng"] = "mock"
-    searxng_base_url: str = "http://localhost:8080"
+    searxng_base_url: str = Field(
+        default="http://localhost:8080",
+        validation_alias=AliasChoices("SEARXNG_URL", "SEARXNG_BASE_URL"),
+    )
+    search_timeout_seconds: float = 8.0
+    search_retries: int = 2
+    search_budget: int = 12
     laya_mode: Literal["shadow", "active"] = "shadow"
     laya_base_url: str | None = None
     sheets_provider: Literal["mock", "google"] = "mock"

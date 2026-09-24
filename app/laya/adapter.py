@@ -1,5 +1,6 @@
 """Ask Laya nine separate questions and clamp answers to the evidence case."""
 
+from datetime import UTC, datetime
 from typing import Literal
 
 from app.domain.models import LayaDecisionSet, RedisRelevance, RunModel
@@ -102,9 +103,22 @@ class LayaAdapter:
             notes.append("Rejected a channel that no compatible template uses.")
 
         mode: Literal["shadow", "active"] = "shadow" if self.mode != "active" else "active"
+        if self.client.name == "laya-shadow-heuristic":
+            decision_mode: Literal["shadow", "production", "heuristic"] = "heuristic"
+            model_name = "untrained-heuristic"
+        elif mode == "active":
+            decision_mode = "production"
+            model_name = str(getattr(self.client, "model", "unspecified"))
+        else:
+            decision_mode = "shadow"
+            model_name = str(getattr(self.client, "model", "unspecified"))
         return LayaDecisionSet(
             mode=mode,
+            decision_mode=decision_mode,
             provider=self.client.name,
+            model=model_name,
+            decided_at=datetime.now(UTC),
+            probabilities=_probabilities(step.next_step, decision_mode),
             checkpoint_trained_for_redis_gtm=False,
             evidence_sufficient=sufficient.sufficient,
             strongest_problem=problem_id,
@@ -174,3 +188,15 @@ def _as_known(value: str) -> RedisRelevance | None:
 
 def default_kernel(mode: str) -> LayaAdapter:
     return LayaAdapter(ShadowHeuristicLLM(), mode=mode)
+
+
+def _probabilities(next_step: str, decision_mode: str) -> dict[str, float]:
+    if decision_mode != "heuristic":
+        return {}
+    base = {"contact_now": 0.0, "research_more": 0.25, "nurture": 0.25, "ignore": 0.25}
+    if next_step in base:
+        base[next_step] = 0.7
+        rest = [key for key in base if key != next_step]
+        for key in rest:
+            base[key] = 0.1
+    return base

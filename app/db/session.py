@@ -16,7 +16,17 @@ def make_engine(url: str) -> Engine:
 
 
 def init_db(engine: Engine) -> None:
-    Base.metadata.create_all(engine)
+    """Apply Alembic migrations. create_all is not the schema path."""
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    root = Path(__file__).resolve().parents[2]
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", engine.url.render_as_string(hide_password=False))
+    command.upgrade(cfg, "head")
 
 
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:

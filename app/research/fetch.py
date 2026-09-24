@@ -19,6 +19,22 @@ class FetchedPage(BaseModel):
     error: str = ""
 
 
+def classify_source_type(url: str) -> str:
+    path = urlparse(url).path.lower()
+    host = (urlparse(url).hostname or "").lower()
+    if host == "github.com" or host.endswith(".github.io"):
+        return "public_code"
+    if any(part in path for part in ("/career", "/jobs", "/job")):
+        return "job_posting"
+    if any(part in path for part in ("/blog", "/engineering", "/news")):
+        return "blog"
+    if any(part in path for part in ("/speaker", "/talk", "/conference")):
+        return "conference"
+    if any(part in path for part in ("/team", "/leadership", "/about", "/bio")):
+        return "biography"
+    return "untrusted_web"
+
+
 @runtime_checkable
 class PageFetcher(Protocol):
     def fetch(self, url: str) -> FetchedPage:
@@ -139,7 +155,7 @@ class HttpxPageFetcher:
             url=final,
             title=title or host,
             text=extracted,
-            source_type="untrusted_web",
+            source_type=classify_source_type(final),
             published_at=published,
             status="ok" if extracted else "error",
             error="" if extracted else "no text extracted",

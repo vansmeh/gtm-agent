@@ -14,6 +14,7 @@ class SearchHit(BaseModel):
     url: str
     title: str
     snippet: str
+    published_at: str | None = None
 
 
 @runtime_checkable
@@ -67,41 +68,90 @@ class MockSearchProvider:
 
 
 class SearXNGSearchProvider:
-    """SearXNG JSON API. Results pointing at LinkedIn are dropped."""
+    """Local or remote SearXNG JSON API. No API key. LinkedIn results are dropped."""
 
-    def __init__(self, base_url: str, client: object) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout: float = 8.0,
+        retries: int = 2,
+        budget: int = 12,
+        transport: object | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
-        self._client = client
+        self.timeout = timeout
+        self.retries = retries
+        self.budget = budget
+        self.calls = 0
+        self._transport = transport
 
     def search(self, query: str, limit: int = 3) -> list[SearchHit]:
+        import asyncio
+
+        return asyncio.run(self.search_async(query, limit=limit))
+
+    async def search_async(self, query: str, limit: int = 3) -> list[SearchHit]:
+
         import httpx
 
-        if not isinstance(self._client, httpx.Client):
-            raise TypeError("SearXNGSearchProvider requires an httpx.Client")
-        response = self._client.get(
-            f"{self.base_url}/search",
-            params={"q": query, "format": "json"},
-            timeout=10.0,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        hits: list[SearchHit] = []
-        results = payload.get("results", [])
-        if not isinstance(results, list):
-            return hits
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            url = str(item.get("url", ""))
-            if not is_allowed_public_url(url):
-                continue
-            hits.append(
-                SearchHit(
-                    url=url,
-                    title=str(item.get("title", "")),
-                    snippet=str(item.get("content", ""))[:240],
+        if self.calls >= self.budget:
+            return []
+        self.calls += 1
+        timeout = httpx.Timeout(self.timeout)
+        async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:  # type: ignore[arg-type]
+            payload = await self._fetch_json(client, query)
+        return normalize_searxng_results(payload, limit=limit)
+
+    async def _fetch_json(self, client: object, query: str) -> dict[str, object]:
+        import asyncio
+
+        import httpx
+
+        if not isinstance(client, httpx.AsyncClient):
+            raise TypeError("async search requires httpx.AsyncClient")
+        last_error = ""
+        for attempt in range(self.retries + 1):
+            try:
+                response = await client.get(
+                    f"{self.base_url}/search",
+                    params={"q": query, "format": "json"},
                 )
+                if response.status_code >= 500:
+                    last_error = f"status {response.status_code}"
+                else:
+                    response.raise_for_status()
+                    body = response.json()
+                    if isinstance(body, dict):
+                        return body
+                    return {}
+            except (httpx.TimeoutException, httpx.HTTPError) as exc:
+                last_error = str(exc)[:160]
+            if attempt < self.retries:
+                await asyncio.sleep(0.2 * (attempt + 1))
+        return {"results": [], "error": last_error}
+
+
+def normalize_searxng_results(payload: dict[str, object], *, limit: int) -> list[SearchHit]:
+    raw = payload.get("results", [])
+    if not isinstance(raw, list):
+        return []
+    hits: list[SearchHit] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url", ""))
+        if not is_allowed_public_url(url):
+            continue
+        published = item.get("publishedDate") or item.get("pubdate") or item.get("published_date")
+        hits.append(
+            SearchHit(
+                url=url,
+                title=str(item.get("title", "")),
+                snippet=str(item.get("content", ""))[:240],
+                published_at=published[:10] if isinstance(published, str) and len(published) >= 10 else None,
             )
-            if len(hits) >= limit:
-                break
-        return hits
+        )
+        if len(hits) >= limit:
+            break
+    return hits

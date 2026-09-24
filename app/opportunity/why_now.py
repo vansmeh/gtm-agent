@@ -7,9 +7,13 @@ from app.domain.models import Evidence, WhyNowEvent
 
 _EVENTS: tuple[tuple[str, str, frozenset[str]], ...] = (
     ("product_launch", "Product launch", frozenset({"ai_search"})),
+    ("engineering_hiring", "Engineering hiring", frozenset({"hiring_platform", "hiring_ml"})),
+    ("technical_initiative", "Technical initiative", frozenset({"rag", "low_latency"})),
+    ("architecture_change", "Architecture change", frozenset({"architecture_change"})),
+    ("leadership_change", "Leadership change", frozenset({"leadership_change"})),
+    ("migration", "Migration", frozenset({"migration"})),
+    ("scale_expansion", "Scale expansion", frozenset({"scale_expansion"})),
     ("ai_initiative", "AI initiative", frozenset({"ai_search", "rag"})),
-    ("hiring", "Hiring", frozenset({"hiring_platform", "hiring_ml"})),
-    ("new_technical_project", "New technical project", frozenset({"rag"})),
 )
 
 
@@ -46,4 +50,16 @@ def detect_why_now(
                 buying_intent=False,
             )
         )
-    return events
+    if events:
+        return events
+    return [
+        WhyNowEvent(
+            id=str(uuid.uuid4()),
+            event_type="unknown",
+            summary="unknown",
+            event_date=None,
+            strength=0.0,
+            evidence_ids=[],
+            buying_intent=False,
+        )
+    ]

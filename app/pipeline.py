@@ -110,6 +110,24 @@ def run_acme_demo(
 
 
 def default_providers(settings: Settings, http_client: object | None = None) -> tuple[object, object]:
-    if settings.search_provider == "searxng" and http_client is not None:
-        return SearXNGSearchProvider(settings.searxng_base_url, http_client), HttpxPageFetcher(http_client)
+    if settings.search_provider == "searxng":
+        return (
+            SearXNGSearchProvider(
+                settings.searxng_base_url,
+                timeout=settings.search_timeout_seconds,
+                retries=settings.search_retries,
+                budget=settings.search_budget,
+            ),
+            HttpxPageFetcher(http_client) if http_client is not None else HttpxPageFetcher(_default_http_client()),
+        )
     return MockSearchProvider([]), FixtureFetcher([])
+
+
+def _default_http_client() -> object:
+    import httpx
+
+    return httpx.Client(timeout=settings_timeout(), follow_redirects=True)
+
+
+def settings_timeout() -> float:
+    return 10.0

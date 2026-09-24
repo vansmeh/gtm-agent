@@ -20,6 +20,24 @@ def queries_for(account_name: str, cycle: int) -> list[str]:
     return [f"{account_name} technical blog"]
 
 
+def person_discovery_queries(
+    account_name: str,
+    domain: str,
+    function_label: str,
+    signal_label: str,
+) -> list[str]:
+    function = function_label or "engineering"
+    signal = signal_label or "technical"
+    host = domain or account_name
+    return [
+        f"{account_name} {function} leadership team",
+        f"{account_name} engineering blog {signal}",
+        f"{account_name} conference speaker {function}",
+        f"{host} public biography {function}",
+        f"{account_name} github {function}",
+    ]
+
+
 def evidence_is_sufficient(topics: set[str], source_urls: set[str]) -> bool:
     has_problem = bool(topics & PROBLEM_TOPICS)
     has_org = bool(topics & ORG_TOPICS)

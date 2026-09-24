@@ -17,8 +17,7 @@ def test_searxng_filters_linkedin() -> None:
             },
         )
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    hits = SearXNGSearchProvider("http://searx.local", client).search("acme", limit=5)
+    hits = SearXNGSearchProvider("http://searx.local", transport=httpx.MockTransport(handler)).search("acme", limit=5)
     assert [hit.url for hit in hits] == ["https://acme.example/post"]
 
 

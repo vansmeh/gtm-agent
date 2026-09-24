@@ -31,7 +31,7 @@ from app.playbook.selection import (
     compatible_templates,
     render_template,
 )
-from app.research.bounds import evidence_is_sufficient, queries_for
+from app.research.bounds import evidence_is_sufficient, person_discovery_queries, queries_for
 from app.research.extract import extract_evidence, observation_from_page
 from app.research.fetch import PageFetcher
 from app.research.search import SearchProvider
@@ -73,32 +73,47 @@ def plan_search(state: GraphState) -> GraphState:
     return dump_run(run)
 
 
+def _ingest_page(run: RunModel, deps: PipelineDeps, url: str, published_hint: str | None = None) -> None:
+    from datetime import date
+
+    if url in run.fetched_urls or len(run.fetched_urls) >= run.max_pages:
+        return
+    page = deps.fetcher.fetch(url)
+    run.fetched_urls.append(url)
+    if page.status != "ok":
+        _log(run, "fetch", f"Skipped {url}: {page.status} {page.error}")
+        return
+    if page.published_at is None and published_hint:
+        try:
+            page = page.model_copy(update={"published_at": date.fromisoformat(published_hint[:10])})
+        except ValueError:
+            page = page
+    observation = observation_from_page(page, observed_at=deps.observed_at, cycle=run.cycle)
+    if any(existing.text_sha256 == observation.text_sha256 for existing in run.observations):
+        _log(run, "extract", f"Skipped duplicate content at {url}.")
+        return
+    run.observations.append(observation)
+    if observation.poisoned:
+        _log(run, "extract", f"Quarantined untrusted instructions at {url}.")
+        return
+    found = extract_evidence(observation)
+    run.evidence.extend(found)
+    _log(run, "extract", f"Extracted {len(found)} evidence items from {url}.")
+
+
 def _search_and_fetch(run: RunModel, deps: PipelineDeps) -> None:
     if run.stop_research:
         return
     queries = queries_for(run.account_name, run.cycle)[: deps.max_searches_per_cycle]
     for query in queries:
-        if len(run.fetched_urls) >= run.max_pages:
-            _log(run, "search", "Page budget reached.")
+        reserved_for_people = 3 if run.cycle == 1 else 0
+        if len(run.fetched_urls) >= max(1, run.max_pages - reserved_for_people):
+            _log(run, "search", "Page budget reached. Remaining pages are reserved for person research.")
             break
         hits = deps.search.search(query, limit=4)
         _log(run, "search", f"Query {query!r} returned {len(hits)} hits.")
         for hit in hits:
-            if hit.url in run.fetched_urls or len(run.fetched_urls) >= run.max_pages:
-                continue
-            page = deps.fetcher.fetch(hit.url)
-            run.fetched_urls.append(hit.url)
-            if page.status != "ok":
-                _log(run, "fetch", f"Skipped {hit.url}: {page.status} {page.error}")
-                continue
-            observation = observation_from_page(page, observed_at=deps.observed_at, cycle=run.cycle)
-            run.observations.append(observation)
-            if observation.poisoned:
-                _log(run, "extract", f"Quarantined untrusted instructions at {page.url}.")
-                continue
-            found = extract_evidence(observation)
-            run.evidence.extend(found)
-            _log(run, "extract", f"Extracted {len(found)} evidence items from {page.url}.")
+            _ingest_page(run, deps, hit.url, hit.published_at)
 
 
 def search_and_extract(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
@@ -148,6 +163,17 @@ def detect_function_node(state: GraphState) -> GraphState:
 def research_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
     def node(state: GraphState) -> GraphState:
         run = load_run(state)
+        function_label = run.functions[0].label if run.functions else ""
+        signal_label = run.signals[0].label if run.signals else ""
+        for query in person_discovery_queries(run.account_name, run.domain, function_label, signal_label)[:3]:
+            if len(run.fetched_urls) >= run.max_pages:
+                break
+            hits = deps.search.search(query, limit=3)
+            _log(run, "people", f"Person discovery query {query!r} returned {len(hits)} hits.")
+            for hit in hits:
+                if hit.url in run.fetched_urls or len(run.fetched_urls) >= run.max_pages:
+                    continue
+                _ingest_page(run, deps, hit.url)
         mentions = discover_people(run.evidence)
         for name, _title, _url in mentions[:4]:
             if len(run.fetched_urls) >= run.max_pages:
@@ -156,16 +182,7 @@ def research_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             for hit in follow:
                 if hit.url in run.fetched_urls or len(run.fetched_urls) >= run.max_pages:
                     continue
-                page = deps.fetcher.fetch(hit.url)
-                run.fetched_urls.append(hit.url)
-                if page.status != "ok":
-                    continue
-                observation = observation_from_page(page, observed_at=deps.observed_at, cycle=run.cycle)
-                run.observations.append(observation)
-                if observation.poisoned:
-                    _log(run, "extract", f"Quarantined untrusted instructions at {page.url}.")
-                    continue
-                run.evidence.extend(extract_evidence(observation))
+                _ingest_page(run, deps, hit.url)
         mentions = discover_people(run.evidence)
         people: list[PersonRecord] = []
         for name, title, urls, confidence in merge_identities(mentions):

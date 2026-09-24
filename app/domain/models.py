@@ -137,7 +137,11 @@ class Opportunity(BaseModel):
 
 class LayaDecisionSet(BaseModel):
     mode: Literal["shadow", "active"]
+    decision_mode: Literal["shadow", "production", "heuristic"] = "heuristic"
     provider: str
+    model: str = "untrained-heuristic"
+    decided_at: datetime | None = None
+    probabilities: dict[str, float] = Field(default_factory=dict)
     checkpoint_trained_for_redis_gtm: bool = False
     evidence_sufficient: bool
     strongest_problem: str | None

@@ -52,8 +52,10 @@ def assess_fit(
             "on the technical problem. No sentence says this person personally owns it."
         )
     elif title_matches_function and ownership_evidence:
-        ownership = 0.62
-        ownership_basis = "Ownership is by title match to the function named in sources."
+        ownership = 0.2
+        ownership_basis = (
+            "Title matches a function named in sources. Responsibility is not inferred from the title alone."
+        )
     elif quoted:
         ownership = 0.4
         ownership_basis = "Quoted near the problem without a function-ownership statement."

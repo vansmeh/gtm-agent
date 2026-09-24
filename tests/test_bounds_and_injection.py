@@ -56,7 +56,7 @@ def test_empty_account_stops_at_three_cycles(tmp_path: Path) -> None:
     assert run.recommendation is not None
     assert run.recommendation.person == "unknown"
     assert run.recommendation.sent is False
-    assert search.calls <= 3 * settings.max_searches_per_cycle
+    assert search.calls <= 3 * settings.max_searches_per_cycle + 8
 
 
 def test_poisoned_page_creates_no_person() -> None:

@@ -146,7 +146,11 @@ class LayaDecisionRow(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("research_runs.id"))
     mode: Mapped[str] = mapped_column(String(20))
+    decision_mode: Mapped[str] = mapped_column(String(20), default="heuristic")
     provider: Mapped[str] = mapped_column(String(80))
+    model: Mapped[str] = mapped_column(String(120), default="untrained-heuristic")
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    probabilities_json: Mapped[str] = mapped_column(Text, default="{}")
     checkpoint_trained_for_redis_gtm: Mapped[bool] = mapped_column(Boolean, default=False)
     payload_json: Mapped[str] = mapped_column(Text)
 

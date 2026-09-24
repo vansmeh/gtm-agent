@@ -169,7 +169,11 @@ class Store:
                     id=str(uuid.uuid4()),
                     run_id=run.run_id,
                     mode=run.laya.mode,
+                    decision_mode=run.laya.decision_mode,
                     provider=run.laya.provider,
+                    model=run.laya.model,
+                    decided_at=run.laya.decided_at,
+                    probabilities_json=json.dumps(run.laya.probabilities),
                     checkpoint_trained_for_redis_gtm=run.laya.checkpoint_trained_for_redis_gtm,
                     payload_json=run.laya.model_dump_json(),
                 )
