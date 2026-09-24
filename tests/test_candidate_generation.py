@@ -30,6 +30,12 @@ def test_byline_and_speaker() -> None:
     assert speakers[0].tier == "tier_3"
 
 
+def test_title_case_headings_are_not_people() -> None:
+    hit = _hit("Introducing Meerkat", "Cloudflare distributed systems.", "https://blog.cloudflare.com/meerkat")
+    kept, _raw, _rejected, _duplicates = extract_names([hit], "Cloudflare", "cloudflare.com")
+    assert kept == []
+
+
 def test_navigation_headings_are_not_people() -> None:
     hits = [
         _hit("Reference Architectures", "Cloudflare reference architectures.", "https://developers.cloudflare.com/reference-architecture/"),

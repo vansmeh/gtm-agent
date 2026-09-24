@@ -334,6 +334,15 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     _ingest_page(run, deps, hit.url, hit.published_at, person_slot="discovery")
                     fetched_functions += 1
             mentions = discover_mentions(run.observations, run.account_name)
+        if run.affected_functions and run.discovery_queries_used < 10 * len(run.affected_functions):
+            for query in recall_queries(run.account_name, run.domain, run.affected_functions):
+                if run.discovery_queries_used >= 10 * len(run.affected_functions):
+                    break
+                hits = deps.search.search(query, limit=4)
+                run.discovery_queries_used += 1
+                _note_search(run, query, hits)
+                _record_snippet_leads(run, hits, query)
+            mentions = discover_mentions(run.observations, run.account_name)
         cap = 50
         views = [
             CandidateView(

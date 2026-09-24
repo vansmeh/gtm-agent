@@ -333,6 +333,8 @@ def _names_from_text(text: str) -> list[tuple[str, str, str]]:
             found.append((match.group(1), _nearby_title(text, match.group(1)), kind))
     if not found:
         for match in _BARE.finditer(text):
+            if not _bare_name_in_prose(text, match.start(), match.end()):
+                continue
             found.append((match.group(1), "", "bare"))
     unique: list[tuple[str, str, str]] = []
     seen: set[str] = set()
@@ -342,6 +344,13 @@ def _names_from_text(text: str) -> list[tuple[str, str, str]]:
         seen.add(name.lower())
         unique.append((name, title, kind))
     return unique
+
+
+def _bare_name_in_prose(text: str, start: int, end: int) -> bool:
+    """A heading of two capitalized words is not a person. Prose names are."""
+    if start > 0 and text[start - 1].isalpha():
+        return False
+    return bool(re.match(r"(?:,|\s+[a-z])", text[end:]))
 
 
 def _nearby_title(text: str, name: str) -> str:
