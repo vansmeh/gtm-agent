@@ -199,6 +199,36 @@ class ActionRow(Base):
     draft: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class PersonOpportunityRow(Base):
+    __tablename__ = "person_opportunities"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("research_runs.id"))
+    account_id: Mapped[str] = mapped_column(String(36))
+    person_id: Mapped[str] = mapped_column(String(36))
+    technical_problem: Mapped[str] = mapped_column(Text, default="")
+    signal_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    evidence_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    supporting_evidence_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    contradicting_evidence_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    person_fit_json: Mapped[str] = mapped_column(Text, default="{}")
+    why_now: Mapped[str] = mapped_column(Text, default="unknown")
+    redis_hypothesis: Mapped[str] = mapped_column(Text, default="")
+    alternative_technologies_json: Mapped[str] = mapped_column(Text, default="[]")
+    contactability_json: Mapped[str] = mapped_column(Text, default="{}")
+    recommended_channel: Mapped[str] = mapped_column(String(40), default="none")
+    decision: Mapped[str] = mapped_column(String(40), default="research_more")
+    template_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    action_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0)
+    status: Mapped[str] = mapped_column(String(40), default="pending_human_review")
+    person_kind: Mapped[str] = mapped_column(String(40), default="access_path")
+    thread_role: Mapped[str] = mapped_column(String(40), default="none")
+    angle: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ResearchLogRow(Base):
     __tablename__ = "research_log"
 

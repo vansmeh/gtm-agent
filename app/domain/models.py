@@ -158,6 +158,9 @@ class LayaDecisionSet(BaseModel):
     use_case_relevance: RedisRelevance | None
     owning_function: str | None
     most_relevant_person_id: str | None
+    strongest_person_opportunity_id: str | None = None
+    contact_decision: Literal["contact_now", "research_more", "nurture", "ignore"] | None = None
+    thread_role: Literal["primary_contact", "secondary_contact", "executive_thread", "none"] | None = None
     timing_strong_enough: bool
     next_step: NextStep
     channel: str | None
@@ -172,6 +175,57 @@ class TemplateChoice(BaseModel):
     persona_id: str
     cadence_id: str
     auto_send: bool = False
+
+
+class Contactability(BaseModel):
+    level: Literal["high", "medium", "low", "unknown"] = "unknown"
+    public_profile: bool = False
+    public_email: bool = False
+    company_contact_path: bool = False
+    public_technical_presence: bool = False
+    known_role: bool = False
+    recency: bool = False
+    evidence_ids: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class PersonHypothesis(BaseModel):
+    id: str
+    signal_id: str
+    signal_label: str
+    likely_functions: list[str]
+    candidate_role_families: list[str]
+
+
+class PersonOpportunity(BaseModel):
+    id: str
+    account_id: str
+    person_id: str
+    person_name: str = ""
+    person_title: str = ""
+    person_kind: Literal["problem_owner", "access_path", "executive"] = "access_path"
+    thread_role: Literal["primary_contact", "secondary_contact", "executive_thread", "none"] = "none"
+    angle: str = ""
+    technical_problem: str = ""
+    signal_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    contradicting_evidence_ids: list[str] = Field(default_factory=list)
+    person_fit: PersonFit | None = None
+    why_now: str = "unknown"
+    why_now_credible: bool = False
+    redis_hypothesis: str = ""
+    redis_credible: bool = False
+    alternative_technologies: list[str] = Field(default_factory=list)
+    contactability: Contactability = Field(default_factory=Contactability)
+    recommended_channel: Literal["email", "linkedin", "call", "multi_channel", "none"] = "none"
+    decision: Literal["contact_now", "research_more", "nurture", "ignore"] = "research_more"
+    template_id: str | None = None
+    action_id: str | None = None
+    confidence: float = 0.0
+    status: Literal["pending_human_review"] = "pending_human_review"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class Recommendation(BaseModel):
@@ -226,6 +280,8 @@ class RunModel(BaseModel):
     signals: list[TechnicalSignal] = Field(default_factory=list)
     functions: list[OwningFunction] = Field(default_factory=list)
     people: list[PersonRecord] = Field(default_factory=list)
+    person_hypotheses: list[PersonHypothesis] = Field(default_factory=list)
+    person_opportunities: list[PersonOpportunity] = Field(default_factory=list)
     why_now: list[WhyNowEvent] = Field(default_factory=list)
     opportunities: list[Opportunity] = Field(default_factory=list)
     template_choice: TemplateChoice | None = None

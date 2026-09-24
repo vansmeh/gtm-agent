@@ -13,6 +13,7 @@ from app.db.models import (
     OpportunityRow,
     OutcomeRow,
     OwningFunctionRow,
+    PersonOpportunityRow,
     PersonRow,
     RecommendationRow,
     ResearchLogRow,
@@ -140,6 +141,37 @@ class Store:
                     contact_confidence=fit.contact_confidence if fit else 0,
                     dossier_json=person.dossier.model_dump_json() if person.dossier else "{}",
                     source_urls_json=json.dumps(person.source_urls),
+                )
+            )
+        for opportunity in run.person_opportunities:
+            fit_json = "{}" if opportunity.person_fit is None else opportunity.person_fit.model_dump_json()
+            self.session.add(
+                PersonOpportunityRow(
+                    id=opportunity.id,
+                    run_id=run.run_id,
+                    account_id=opportunity.account_id,
+                    person_id=opportunity.person_id,
+                    technical_problem=opportunity.technical_problem,
+                    signal_ids_json=json.dumps(opportunity.signal_ids),
+                    evidence_ids_json=json.dumps(opportunity.evidence_ids),
+                    supporting_evidence_ids_json=json.dumps(opportunity.supporting_evidence_ids),
+                    contradicting_evidence_ids_json=json.dumps(opportunity.contradicting_evidence_ids),
+                    person_fit_json=fit_json,
+                    why_now=opportunity.why_now,
+                    redis_hypothesis=opportunity.redis_hypothesis,
+                    alternative_technologies_json=json.dumps(opportunity.alternative_technologies),
+                    contactability_json=opportunity.contactability.model_dump_json(),
+                    recommended_channel=opportunity.recommended_channel,
+                    decision=opportunity.decision,
+                    template_id=opportunity.template_id,
+                    action_id=opportunity.action_id,
+                    confidence=opportunity.confidence,
+                    status=opportunity.status,
+                    person_kind=opportunity.person_kind,
+                    thread_role=opportunity.thread_role,
+                    angle=opportunity.angle,
+                    created_at=opportunity.created_at,
+                    updated_at=opportunity.updated_at,
                 )
             )
         for event in run.why_now:

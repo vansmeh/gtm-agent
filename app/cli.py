@@ -56,48 +56,76 @@ def render_live_report(run: RunModel) -> str:
         f"ACCOUNT: {run.account_name}",
         f"TECHNICAL SIGNAL: {signal}",
         f"LIKELY FUNCTION: {function}",
-        "CANDIDATE PEOPLE:",
+        "LIKELY FUNCTIONS: " + (", ".join(item.label for item in run.functions) or function),
+        "PERSON OPPORTUNITIES:",
     ]
-    if not run.people:
+    if not run.person_opportunities:
         lines.append("none")
-    for person in run.people:
-        evidence_lines = [
-            f"- {item.source_url} | {item.excerpt}" for item in run.evidence if person.name in item.excerpt
-        ][:4]
-        if person.identity_excerpt and person.source_urls:
-            identity_line = f"- {person.source_urls[0]} | {person.identity_excerpt}"
-            if identity_line not in evidence_lines:
-                evidence_lines.insert(0, identity_line)
-        why = _person_why_now(run, person.name, selected=person.selection_status == "verified_person")
-        matter = "" if person.dossier is None else person.dossier.appears_to_own
-        contradictions = "; ".join(person.contradictions) if person.contradictions else "none"
+    evidence_by_id = {item.id: item for item in run.evidence}
+    for row in run.person_opportunities:
+        person = next((item for item in run.people if item.id == row.person_id), None)
+        kind = {
+            "problem_owner": "PROBLEM OWNER",
+            "access_path": "ACCESS PATH",
+            "executive": "EXECUTIVE",
+        }[row.person_kind]
+        fit = "not scored" if row.person_fit is None else _fit_line(person) if person else "not scored"
+        footprint = "none" if person is None else ", ".join(person.footprint_topics) or "none"
+        support = [
+            f"- {evidence_by_id[item_id].source_url} | {evidence_by_id[item_id].excerpt}"
+            for item_id in row.supporting_evidence_ids
+            if item_id in evidence_by_id
+        ][:3]
+        contra = [
+            f"- {evidence_by_id[item_id].source_url} | {evidence_by_id[item_id].excerpt}"
+            for item_id in row.contradicting_evidence_ids
+            if item_id in evidence_by_id
+        ][:3]
         lines.extend(
             [
-                f"NAME: {person.name}",
-                f"TITLE: {person.title or 'unknown'}",
-                f"WHY THEY MATTER: {matter}",
-                f"RESPONSIBILITY: {person.responsibility_status}",
-                f"PERSON/PROBLEM FIT: {_fit_line(person)}",
-                f"WHY NOW: {why}",
-                "EVIDENCE:",
-                *(evidence_lines or ["- none"]),
-                f"CONTRADICTIONS: {contradictions}",
-                (
-                    f"CONFIDENCE: identity={person.identity_confidence} "
-                    f"validity={person.validity} selection={person.selection_status}"
-                ),
+                f"NAME: {row.person_name}",
+                f"TITLE: {row.person_title or 'unknown'}",
+                f"ROLE IN THREAD: {kind}",
+                f"WHY THIS PERSON: {row.angle}",
+                f"TECHNICAL FOOTPRINT: {footprint}",
+                f"PERSON/PROBLEM FIT: {fit}",
+                f"WHY NOW: {row.why_now}",
+                f"CONTACTABILITY: {row.contactability.level}",
+                f"REDIS HYPOTHESIS: {row.redis_hypothesis or 'none'}",
+                "ALTERNATIVES: " + (", ".join(row.alternative_technologies) or "none"),
+                "SUPPORTING EVIDENCE:",
+                *(support or ["- none"]),
+                "CONTRADICTING EVIDENCE:",
+                *(contra or ["- none"]),
+                "UNKNOWN: " + ("; ".join(person.contradictions) if person and person.contradictions else "none"),
+                f"RECOMMENDED CHANNEL: {row.recommended_channel}",
+                f"PLAYBOOK: {row.template_id or 'none'}",
+                f"DECISION: {row.decision}",
             ]
         )
+    primary = next((row for row in run.person_opportunities if row.thread_role == "primary_contact"), None)
+    secondary = next((row for row in run.person_opportunities if row.thread_role == "secondary_contact"), None)
+    executive = next((row for row in run.person_opportunities if row.thread_role == "executive_thread"), None)
+    if primary is None and secondary is None and executive is None:
+        lines.append("NO ACTIONABLE PERSON OPPORTUNITY")
+    else:
+        lines.append("PRIMARY CONTACT: " + (primary.person_name if primary else "none"))
+        lines.append("SECONDARY CONTACT: " + (secondary.person_name if secondary else "none"))
+        lines.append("EXECUTIVE THREAD: " + (executive.person_name if executive else "none"))
     if selected is None:
         lines.append("FINAL: NO VERIFIED PERSON")
     else:
         lines.append(f"FINAL: SELECTED PERSON: {selected.name}")
-    primary = next((item for item in run.opportunities if item.is_primary), None)
+    redis_primary = next((item for item in run.opportunities if item.is_primary), None)
     lines.append(
         "REDIS HYPOTHESIS: "
-        + ("none" if primary is None else f"{primary.use_case_id} relevance={primary.relevance}. {primary.hypothesis}")
+        + (
+            "none"
+            if redis_primary is None
+            else f"{redis_primary.use_case_id} relevance={redis_primary.relevance}. {redis_primary.hypothesis}"
+        )
     )
-    lines.append("ALTERNATIVES: " + ("none" if primary is None else ", ".join(primary.alternatives)))
+    lines.append("ALTERNATIVES: " + ("none" if redis_primary is None else ", ".join(redis_primary.alternatives)))
     unknowns = [] if rec is None else rec.unknown
     lines.append("UNKNOWN:")
     lines.extend(f"- {item}" for item in unknowns[:8])

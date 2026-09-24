@@ -14,6 +14,16 @@ from app.domain.models import (
 )
 from app.graph.state import GraphState, dump_run, load_run
 from app.laya.adapter import LayaAdapter
+from app.opportunity.person_opportunity import (
+    apply_redis,
+    apply_why_now,
+    assign_threads,
+    build_opportunities,
+    decide_channel,
+    decide_contact,
+    hypotheses_for,
+    hypothesis_queries,
+)
 from app.opportunity.redis_mapper import map_opportunities
 from app.opportunity.why_now import detect_why_now
 from app.person.discovery import discover_mentions
@@ -174,13 +184,22 @@ def detect_function_node(state: GraphState) -> GraphState:
     return dump_run(run)
 
 
-def research_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
+def generate_person_hypotheses(state: GraphState) -> GraphState:
+    run = load_run(state)
+    run.person_hypotheses = hypotheses_for(run.signals)
+    labels = [item.signal_label for item in run.person_hypotheses] or ["none"]
+    _log(run, "hypotheses", f"Person hypothesis tree for {', '.join(labels)}.")
+    return dump_run(run)
+
+
+def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
     def node(state: GraphState) -> GraphState:
         run = load_run(state)
         function_label = run.functions[0].label if run.functions else ""
         signal_label = " ".join(item.label for item in run.signals[:2]) or "technical"
-        queries = person_discovery_queries(
-            run.account_name, run.domain, function_label, signal_label
+        queries = (
+            hypothesis_queries(run.account_name, run.person_hypotheses)
+            + person_discovery_queries(run.account_name, run.domain, function_label, signal_label)
         )[: deps.person_query_budget]
         collected: list[tuple[int, str, str | None]] = []
         seen_hits: set[str] = set()
@@ -244,7 +263,23 @@ def research_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             record.authored_urls = [item.url for item in record.activity if item.authored]
             people.append(record)
         run.people = people
-        _log(run, "people", f"Discovered {len(people)} people from public excerpts.")
+        _log(run, "verify", f"Verified {len(people)} people from fetched pages.")
+        return dump_run(run)
+
+    return node
+
+
+def verify_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
+    del deps
+    return match_people
+
+
+def research_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
+    del deps
+
+    def node(state: GraphState) -> GraphState:
+        run = load_run(state)
+        _log(run, "people", f"Technical footprint recorded for {len(run.people)} people.")
         return dump_run(run)
 
     return node
@@ -289,6 +324,7 @@ def match_people(state: GraphState) -> GraphState:
 def why_now_node(state: GraphState) -> GraphState:
     run = load_run(state)
     run.why_now = detect_why_now(run.evidence, observed_on=run.observed_at.date(), window_days=180)
+    apply_why_now(run.person_opportunities, run.why_now, run.evidence)
     _log(run, "why_now", f"Recorded {len(run.why_now)} why-now events. Buying intent remains false.")
     return dump_run(run)
 
@@ -297,8 +333,41 @@ def map_redis(state: GraphState) -> GraphState:
     run = load_run(state)
     run.opportunities = map_opportunities(run.evidence)
     primary = next((item for item in run.opportunities if item.is_primary), None)
+    apply_redis(run.person_opportunities, run.opportunities)
     label = "none" if primary is None else f"{primary.use_case_id}:{primary.relevance}"
     _log(run, "redis", f"Primary Redis hypothesis is {label}.")
+    return dump_run(run)
+
+
+def build_person_opportunities(state: GraphState) -> GraphState:
+    run = load_run(state)
+    run.person_opportunities = build_opportunities(
+        account_id=run.account_id,
+        people=run.people,
+        signals=run.signals,
+        evidence=run.evidence,
+        observed_at=run.observed_at,
+    )
+    _log(run, "person_opportunity", f"Built {len(run.person_opportunities)} person opportunities.")
+    return dump_run(run)
+
+
+def decide_contact_node(state: GraphState) -> GraphState:
+    run = load_run(state)
+    by_id = {person.id: person for person in run.people}
+    for row in run.person_opportunities:
+        row.decision = decide_contact(row, by_id.get(row.person_id))  # type: ignore[assignment]
+        row.updated_at = run.observed_at
+    _log(run, "decide_contact", "Contact decision uses problem, ownership, trigger, and Redis hypothesis.")
+    return dump_run(run)
+
+
+def decide_channel_node(state: GraphState) -> GraphState:
+    run = load_run(state)
+    for row in run.person_opportunities:
+        row.recommended_channel = decide_channel(row)  # type: ignore[assignment]
+    assign_threads(run.person_opportunities)
+    _log(run, "decide_channel", "Channel and thread are per person. The same message is not reused.")
     return dump_run(run)
 
 
@@ -327,6 +396,12 @@ def select_templates(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 cadence_id=cadence,
                 auto_send=False,
             )
+            primary = next(
+                (row for row in run.person_opportunities if row.person_id == person.id),
+                None,
+            )
+            if primary is not None and primary.recommended_channel == chosen.channel:
+                primary.template_id = chosen.id
         _log(run, "playbook", f"Compatible templates: {run.compatible_template_ids or ['none']}.")
         return dump_run(run)
 
@@ -337,6 +412,15 @@ def laya_node(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
     def node(state: GraphState) -> GraphState:
         run = load_run(state)
         run.laya = deps.kernel.decide(run)
+        if run.laya is not None and run.laya.decision_mode == "heuristic":
+            primary = next(
+                (row for row in run.person_opportunities if row.thread_role == "primary_contact"),
+                None,
+            )
+            run.laya.strongest_person_opportunity_id = None if primary is None else primary.id
+            run.laya.contact_decision = "research_more"
+            run.laya.thread_role = "none" if primary is None else primary.thread_role
+            run.laya.notes.append("Shadow Laya is not trained for Redis GTM and does not emit contact_now.")
         _log(
             run,
             "laya",
@@ -470,6 +554,9 @@ def recommend(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 }
             )
         run.action_id = str(uuid.uuid4())
+        for row in run.person_opportunities:
+            if row.thread_role == "primary_contact":
+                row.action_id = run.action_id
         run.recommendation = Recommendation(
             id=str(uuid.uuid4()),
             person="unknown" if person is None else person.name,
