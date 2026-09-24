@@ -8,6 +8,7 @@ from datetime import datetime
 
 from app.domain.models import (
     Evidence,
+    EvidenceEdge,
     OwnershipLink,
     PersonRecord,
     PersonSearchTrace,
@@ -45,7 +46,12 @@ from app.person.artifact_discovery import (
     teams_in_text,
 )
 from app.person.candidate_generation import extract_names, recall_queries
-from app.person.current_affiliation import current_role_search_queries, resolve_affiliation
+from app.person.current_affiliation import (
+    AffiliationResolution,
+    current_role_search_queries,
+    evidence_graph,
+    resolve_affiliation,
+)
 from app.person.discovery import discover_mentions
 from app.person.enrichment import (
     CandidateView,
@@ -66,6 +72,7 @@ from app.person.responsibility import classify_responsibility, extract_responsib
 from app.person.role import function_guess_from_title, seniority_from_title
 from app.person.snippets import candidates_from_hits
 from app.person.technical_footprint import build_footprint
+from app.person.timeline import indexed_profile_queries
 from app.playbook.selection import (
     Playbook,
     choose_template,
@@ -344,6 +351,11 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 _note_search(run, query, hits)
                 _record_snippet_leads(run, hits, query)
             mentions = discover_mentions(run.observations, run.account_name)
+        if run.affected_functions:
+            for query in indexed_profile_queries(run.account_name, run.affected_functions)[:4]:
+                hits = deps.search.search(query, limit=4)
+                _note_search(run, query, hits)
+                _record_snippet_leads(run, hits, query)
         cap = 50
         views = [
             CandidateView(
@@ -537,10 +549,14 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             record.affiliation = affiliation.affiliation  # type: ignore[assignment]
             record.affiliation_evidence_ids = affiliation.affiliation_evidence_ids
             record.role_state = affiliation.role_state  # type: ignore[assignment]
+            record.role_evidence_ids = affiliation.role_evidence_ids
             record.function_level = affiliation.function_level  # type: ignore[assignment]
             record.person_function_evidence_ids = affiliation.function_evidence_ids
             record.technical_activity = affiliation.technical_activity  # type: ignore[assignment]
             record.activity_evidence_ids = affiliation.activity_evidence_ids
+            record.technical_responsibility = (
+                record.function_guess or (run.affected_functions[0] if run.affected_functions else "")
+            )
             record.candidate_state = affiliation.candidate_state  # type: ignore[assignment]
             if affiliation.role_state == "probable_current" and record.validity == "stale":
                 record.validity = "unknown"
@@ -643,6 +659,25 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 ),
             )
             for item in run.artifacts
+        ]
+        run.evidence_edges = [
+            edge
+            for person in people
+            for edge in evidence_graph(
+                person.name,
+                AffiliationResolution(
+                    affiliation=person.affiliation,
+                    affiliation_evidence_ids=person.affiliation_evidence_ids,
+                    role_state=person.role_state,
+                    role_evidence_ids=person.role_evidence_ids,
+                    function_level=person.function_level,
+                    function_evidence_ids=person.person_function_evidence_ids,
+                ),
+                responsibility=person.technical_responsibility,
+                trigger="",
+                trigger_evidence_ids=[],
+                observed_on=person.role_published_at,
+            )
         ]
         run.people = people
         _log(run, "verify", f"Verified {len(people)} people from fetched pages.")
@@ -757,6 +792,24 @@ def _record_snippet_leads(run: RunModel, hits: Sequence[object], query: str) -> 
                 finding=mention.excerpt[:180],
                 decision="accept",
                 reason="snippet names the person, company, and role; identity is not verified yet",
+            )
+        )
+        run.evidence.append(
+            Evidence(
+                id=str(uuid.uuid4()),
+                observation_id="snippet",
+                excerpt=mention.excerpt,
+                source_url=mention.url,
+                source_title=mention.title,
+                source_type="search_snippet",
+                published_at=mention.published_at,
+                observed_at=run.observed_at,
+                confidence=0.45,
+                lineage=[],
+                topics=[],
+                supports_problem=False,
+                contradicts_redis=False,
+                is_explicit_gap=False,
             )
         )
 
@@ -878,6 +931,22 @@ def why_now_node(state: GraphState) -> GraphState:
         run.evidence, observed_on=run.observed_at.date(), window_days=ACCOUNT_TRIGGER_DAYS
     )
     apply_why_now(run.person_opportunities, run.why_now, run.evidence, run.people)
+    for person in run.people:
+        named = [item for item in run.why_now if person.name in " ".join(item.summary for item in run.why_now)]
+        person.trigger_to_function = run.affected_functions[0] if run.why_now and run.affected_functions else ""
+        person.trigger_to_person = person.name if any(person.name in event.summary for event in run.why_now) else ""
+        del named
+        if person.trigger_to_function and person.technical_responsibility:
+            run.evidence_edges.append(
+                EvidenceEdge(
+                    source=person.technical_responsibility,
+                    target=person.trigger_to_function,
+                    relation="account_trigger",
+                    evidence_ids=[event.id for event in run.why_now],
+                    confidence=0.7,
+                    observed_on=run.observed_at.date(),
+                )
+            )
     _log(run, "why_now", f"Recorded {len(run.why_now)} why-now events. Buying intent remains false.")
     return dump_run(run)
 

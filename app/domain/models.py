@@ -118,10 +118,14 @@ class PersonRecord(BaseModel):
     affiliation: Literal["current", "probable", "historical", "unknown"] = "unknown"
     affiliation_evidence_ids: list[str] = Field(default_factory=list)
     role_state: Literal["current", "probable_current", "historical", "unknown"] = "unknown"
+    role_evidence_ids: list[str] = Field(default_factory=list)
     function_level: Literal["explicit", "strong", "probable", "weak", "unknown"] = "unknown"
     person_function_evidence_ids: list[str] = Field(default_factory=list)
     technical_activity: Literal["strong", "historical", "unknown"] = "unknown"
     activity_evidence_ids: list[str] = Field(default_factory=list)
+    technical_responsibility: str = ""
+    trigger_to_function: str = ""
+    trigger_to_person: str = ""
     candidate_state: Literal[
         "verified_current_owner",
         "verified_current_person",
@@ -232,6 +236,15 @@ class TechnicalArtifact(BaseModel):
     published_at: date | None = None
     evidence_id: str
     kind: str
+
+
+class EvidenceEdge(BaseModel):
+    source: str
+    target: str
+    relation: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    observed_on: date | None = None
 
 
 class OwnershipLink(BaseModel):
@@ -386,6 +399,7 @@ class RunModel(BaseModel):
     function_evidence_ids: list[str] = Field(default_factory=list)
     artifacts: list[TechnicalArtifact] = Field(default_factory=list)
     ownership_links: list[OwnershipLink] = Field(default_factory=list)
+    evidence_edges: list[EvidenceEdge] = Field(default_factory=list)
     person_hypotheses: list[PersonHypothesis] = Field(default_factory=list)
     person_traces: list[PersonSearchTrace] = Field(default_factory=list)
     snippet_leads: list[SnippetLead] = Field(default_factory=list)

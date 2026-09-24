@@ -7,7 +7,8 @@ It does not, by itself, prove ownership or a current title.
 from dataclasses import dataclass, field
 from datetime import date
 
-from app.domain.models import Evidence
+from app.domain.models import Evidence, EvidenceEdge
+from app.person.timeline import build_timeline
 
 _DAYS = 365
 _OFFICIAL = ("engineering_blog", "blog", "company_news", "biography")
@@ -40,6 +41,8 @@ def current_role_search_queries(name: str, account_name: str, domain: str) -> li
         f'site:{host} "{name}" engineering',
         f'site:{host} "{name}" platform',
         f'site:{host} "{name}" infrastructure',
+        f'"{name}" "{account_name}" "current title"',
+        f'site:linkedin.com/in "{name}" "{account_name}"',
     ]
 
 
@@ -79,15 +82,24 @@ def resolve_affiliation(
     elif any(_technical(item, functions) for item in old_company):
         result.technical_activity = "historical"
         result.activity_evidence_ids = [item.id for item in old_company[:1]]
-    if recent_roles:
+    snippets = [item for item in roles if item.source_type == "search_snippet"]
+    dated_roles = [item for item in roles if item.source_type != "search_snippet" and item.published_at is not None]
+    timeline = build_timeline(name, title, evidence, observed_on=observed_on)
+    if timeline.current is not None and timeline.current.state == "current":
         result.role_state = "current"
-        result.role_evidence_ids = [item.id for item in recent_roles[:1]]
+        result.role_evidence_ids = [timeline.current.evidence_id]
+    elif snippets and not any(_dated(item, observed_on) for item in dated_roles):
+        result.role_state = "probable_current"
+        result.role_evidence_ids = [snippets[0].id]
+        if result.affiliation == "unknown":
+            result.affiliation = "probable"
+            result.affiliation_evidence_ids = [snippets[0].id]
     elif result.affiliation in {"current", "probable"}:
         result.role_state = "probable_current"
         result.role_evidence_ids = list(result.affiliation_evidence_ids)
-    elif roles and not recent_company:
+    elif timeline.historical and not recent_company:
         result.role_state = "historical"
-        result.role_evidence_ids = [roles[0].id]
+        result.role_evidence_ids = [timeline.historical[-1].evidence_id]
     result.function_level, result.function_evidence_ids = _function_level(
         title, activity, recent_roles, team, functions
     )
@@ -105,13 +117,10 @@ def _function_level(
     team: list[Evidence],
     functions: list[str],
 ) -> tuple[str, list[str]]:
-    if activity and (roles or team):
-        ids = [activity[0].id]
-        ids.append((roles or team)[0].id)
-        if any(_states_role(item, title) and _technical(item, functions) for item in activity):
-            return "strong", ids
-        if roles or team:
-            return "strong", ids
+    if roles and team and not _same_copy(roles[0], team[0]):
+        return "strong", [roles[0].id, team[0].id]
+    if activity and roles and not _same_copy(activity[0], roles[0]):
+        return "probable", [activity[0].id, roles[0].id]
     if activity:
         return "probable", [activity[0].id]
     lowered = title.lower()
@@ -131,18 +140,95 @@ def _ownership(
         return "unknown", []
     if result.function_level == "weak" and not activity:
         return "weak", []
-    sources = activity + roles + team
-    hosts = {_host(item.source_url) for item in sources}
-    if activity and (roles or team) and len(hosts) >= 2 and result.affiliation in {"current", "probable"}:
-        ids = [activity[0].id, (roles or team)[0].id]
-        if team and team[0].id not in ids:
-            ids.append(team[0].id)
-        return "strong", ids
+    usable_roles = [item for item in roles if item.source_type != "search_snippet"]
+    role = usable_roles[0] if usable_roles else None
+    artifact = next((item for item in activity if role is None or not _same_copy(item, role)), None)
+    if (
+        artifact is not None
+        and role is not None
+        and team
+        and result.affiliation in {"current", "probable"}
+        and _independent_group(artifact, role, team[0])
+    ):
+        return "strong", [artifact.id, role.id, team[0].id]
     if activity and result.role_state in {"current", "probable_current"}:
         return "probable", [activity[0].id]
     if result.function_level == "weak":
         return "weak", []
     return "unknown", []
+
+
+def evidence_graph(
+    name: str,
+    result: AffiliationResolution,
+    *,
+    responsibility: str,
+    trigger: str,
+    trigger_evidence_ids: list[str],
+    observed_on: date | None,
+) -> list[EvidenceEdge]:
+    """Each claim is an edge. A missing claim does not invent the next one."""
+    edges: list[EvidenceEdge] = []
+    if result.affiliation == "unknown":
+        return edges
+    edges.append(
+        EvidenceEdge(
+            source=name,
+            target=result.affiliation,
+            relation="current_affiliation",
+            evidence_ids=result.affiliation_evidence_ids,
+            confidence=0.7 if result.affiliation == "current" else 0.45,
+            observed_on=observed_on,
+        )
+    )
+    if result.role_state == "unknown":
+        return edges
+    edges.append(
+        EvidenceEdge(
+            source=result.affiliation,
+            target=result.role_state,
+            relation="current_role",
+            evidence_ids=result.role_evidence_ids,
+            confidence=0.8 if result.role_state == "current" else 0.5,
+            observed_on=observed_on,
+        )
+    )
+    if result.function_level == "unknown":
+        return edges
+    edges.append(
+        EvidenceEdge(
+            source=result.role_state,
+            target=result.function_level,
+            relation="current_function",
+            evidence_ids=result.function_evidence_ids,
+            confidence=0.75 if result.function_level == "strong" else 0.4,
+            observed_on=observed_on,
+        )
+    )
+    if not responsibility:
+        return edges
+    edges.append(
+        EvidenceEdge(
+            source=result.function_level,
+            target=responsibility,
+            relation="technical_responsibility",
+            evidence_ids=result.function_evidence_ids,
+            confidence=0.6 if result.function_level == "strong" else 0.35,
+            observed_on=observed_on,
+        )
+    )
+    if trigger:
+        edges.append(
+            EvidenceEdge(
+                source=responsibility,
+                target=trigger,
+                relation="account_trigger",
+                evidence_ids=trigger_evidence_ids,
+                confidence=0.7 if trigger_evidence_ids else 0.3,
+                observed_on=observed_on,
+            )
+        )
+    return edges
 
 
 def _state(result: AffiliationResolution) -> str:
@@ -210,6 +296,22 @@ def _undated_org(item: Evidence) -> bool:
 def _team_page(item: Evidence) -> bool:
     text = item.excerpt.lower()
     return item.source_type == "job_posting" or "reports to" in text or "team owns" in text or "team is" in text
+
+
+def _same_copy(left: Evidence, right: Evidence) -> bool:
+    words_a = set(left.excerpt.lower().split())
+    words_b = set(right.excerpt.lower().split())
+    if not words_a or not words_b:
+        return False
+    return len(words_a & words_b) / min(len(words_a), len(words_b)) >= 0.8
+
+
+def _independent_group(activity: Evidence, role: Evidence, team: Evidence) -> bool:
+    items = [activity, role, team]
+    hosts = {_host(item.source_url) for item in items}
+    if len(hosts) < 2:
+        return False
+    return not (_same_copy(activity, role) or _same_copy(activity, team) or _same_copy(role, team))
 
 
 def _host(url: str) -> str:
