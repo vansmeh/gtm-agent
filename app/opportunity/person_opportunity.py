@@ -108,6 +108,20 @@ def trigger_queries(name: str, account_name: str) -> list[str]:
     return [f'"{name}" "{account_name}" {item}' for item in _TRIGGERS]
 
 
+def current_role_queries(name: str, account_name: str, domain: str, title: str) -> list[str]:
+    host = domain or account_name
+    role = title or "engineer"
+    return [
+        f'"{name}" "{account_name}" current role',
+        f'"{name}" "{account_name}" 2026',
+        f'"{name}" site:{host}',
+        f'site:{host} "{name}"',
+        f'site:{host} "{role}"',
+        f'"{name}" "{account_name}" promoted',
+        f'"{name}" "{account_name}" joined',
+    ]
+
+
 def c_suite_without_specialist_role(title: str) -> bool:
     lowered = title.lower()
     specialist = re.search(
@@ -131,7 +145,7 @@ def research_gap(
     if not has_owner:
         missing.append("verified problem owner")
     if not has_trigger:
-        missing.append("person-specific trigger")
+        missing.append("current trigger linked to a current owner")
     if not has_hypothesis:
         missing.append("credible Redis hypothesis")
     if not problem:
@@ -246,8 +260,14 @@ def build_opportunities(
     return rows
 
 
-def apply_why_now(rows: list[PersonOpportunity], events: list[WhyNowEvent], evidence: list[Evidence]) -> None:
+def apply_why_now(
+    rows: list[PersonOpportunity],
+    events: list[WhyNowEvent],
+    evidence: list[Evidence],
+    people: list[PersonRecord] | None = None,
+) -> None:
     credible = [event for event in events if event.event_type != "unknown"]
+    by_id = {person.id: person for person in people or []}
     for row in rows:
         trigger_ids = {eid for event in credible for eid in event.evidence_ids}
         named = [
@@ -255,12 +275,33 @@ def apply_why_now(rows: list[PersonOpportunity], events: list[WhyNowEvent], evid
             for item in evidence
             if row.person_name and row.person_name in item.excerpt and item.id in trigger_ids
         ]
+        person = by_id.get(row.person_id)
+        account = credible[0].summary if credible else ""
         if named:
             row.why_now = named[0].excerpt
             row.why_now_credible = True
+            row.trigger_strength = "strong"
+            row.account_trigger = account
+            row.trigger_link = "Person is named on the current trigger."
+        elif (
+            person is not None
+            and person.validity == "current"
+            and person.current_ownership
+            and person.responsibility_status in {"confirmed", "probable"}
+            and credible
+        ):
+            row.why_now = "Current account event affects a function this person currently owns."
+            row.why_now_credible = True
+            row.trigger_strength = "account-linked"
+            row.account_trigger = account
+            function = person.function_guess or "the affected function"
+            row.trigger_link = f"ACCOUNT TRIGGER → {function} → {person.name}"
         else:
             row.why_now = "unknown"
             row.why_now_credible = False
+            row.trigger_strength = "unknown"
+            row.account_trigger = account
+            row.trigger_link = ""
 
 
 def apply_redis(rows: list[PersonOpportunity], opportunities: list[Opportunity]) -> None:

@@ -25,6 +25,7 @@ from app.opportunity.person_opportunity import (
     assign_threads,
     build_opportunities,
     c_suite_without_specialist_role,
+    current_role_queries,
     decide_channel,
     decide_contact,
     footprint_queries,
@@ -36,6 +37,7 @@ from app.opportunity.person_opportunity import (
 from app.opportunity.redis_mapper import map_opportunities
 from app.opportunity.why_now import detect_why_now
 from app.person.discovery import discover_mentions
+from app.person.freshness import ACCOUNT_TRIGGER_DAYS, resolve_freshness
 from app.person.identity import identities_from_mentions, validity_for
 from app.person.person_account_fit import assess_fit
 from app.person.persona_mapping import map_persona
@@ -270,8 +272,10 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     )
                 )
                 continue
-            stages = footprint_queries(mention.name, run.account_name, topic) + trigger_queries(
-                mention.name, run.account_name
+            stages = (
+                current_role_queries(mention.name, run.account_name, run.domain, mention.title)[:2]
+                + footprint_queries(mention.name, run.account_name, topic)[:1]
+                + trigger_queries(mention.name, run.account_name)[:1]
             )
             fetched_followups = 0
             for index, query in enumerate(stages):
@@ -289,11 +293,11 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 )
                 # The first footprint query and the first trigger query may fetch.
                 # Later queries are stored. Extra pages stay inside the person budget.
-                may_fetch = index in {0, len(footprint_queries(mention.name, run.account_name, topic))}
-                if not may_fetch or run.person_pages_used >= run.person_page_budget or fetched_followups >= 4:
+                if run.person_pages_used >= run.person_page_budget or fetched_followups >= 4:
                     continue
                 fresh = [hit for hit in follow if hit.url not in run.fetched_urls]
-                for hit in fresh[:2]:
+                take = 1 if index < 2 else 2
+                for hit in fresh[:take]:
                     if run.person_pages_used >= run.person_page_budget or fetched_followups >= 4:
                         break
                     _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
@@ -338,6 +342,17 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 persona_id=map_persona(identity.title, deps.playbook),
             )
             record.authored_urls = [item.url for item in record.activity if item.authored]
+            resolved = resolve_freshness(
+                identity.name,
+                mentions,
+                run.evidence,
+                observed_on=observed_on,
+            )
+            record.validity = resolved.validity  # type: ignore[assignment]
+            record.role_freshness = resolved.role_freshness  # type: ignore[assignment]
+            record.evidence_classes = resolved.evidence_classes
+            record.current_ownership = resolved.current_ownership
+            record.historical_expertise = resolved.historical_expertise
             if identity.contradictions:
                 reason = "contradictory identity"
                 decision = "reject"
@@ -550,8 +565,10 @@ def match_people(state: GraphState) -> GraphState:
 
 def why_now_node(state: GraphState) -> GraphState:
     run = load_run(state)
-    run.why_now = detect_why_now(run.evidence, observed_on=run.observed_at.date(), window_days=180)
-    apply_why_now(run.person_opportunities, run.why_now, run.evidence)
+    run.why_now = detect_why_now(
+        run.evidence, observed_on=run.observed_at.date(), window_days=ACCOUNT_TRIGGER_DAYS
+    )
+    apply_why_now(run.person_opportunities, run.why_now, run.evidence, run.people)
     _log(run, "why_now", f"Recorded {len(run.why_now)} why-now events. Buying intent remains false.")
     return dump_run(run)
 

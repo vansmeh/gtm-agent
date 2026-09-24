@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     person_page_budget: int = 6
     person_query_budget: int = 10
     why_now_window_days: int = 180
+    current_role_window_days: int = 365
+    current_activity_window_days: int = 365
 
 
 @lru_cache(maxsize=1)

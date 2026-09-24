@@ -117,7 +117,7 @@ def test_next_question_names_the_missing_owner() -> None:
         has_hypothesis=True,
     )
     assert "verified problem owner" in missing
-    assert "person-specific trigger" in missing
+    assert "current trigger linked to a current owner" in missing
     assert question == "Which Redis engineers publicly own vector search?"
 
 

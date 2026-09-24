@@ -106,6 +106,10 @@ class PersonRecord(BaseModel):
     last_seen: date | None = None
     role_published_at: date | None = None
     validity: Literal["current", "stale", "unknown"] = "unknown"
+    role_freshness: Literal["current", "historical", "unknown"] = "unknown"
+    evidence_classes: list[str] = Field(default_factory=list)
+    current_ownership: str = ""
+    historical_expertise: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
     source_urls: list[str]
     seniority: float
@@ -238,6 +242,9 @@ class PersonOpportunity(BaseModel):
     person_fit: PersonFit | None = None
     why_now: str = "unknown"
     why_now_credible: bool = False
+    account_trigger: str = ""
+    trigger_strength: Literal["strong", "moderate", "account-linked", "unknown"] = "unknown"
+    trigger_link: str = ""
     redis_hypothesis: str = ""
     redis_credible: bool = False
     alternative_technologies: list[str] = Field(default_factory=list)

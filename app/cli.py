@@ -105,16 +105,29 @@ def render_live_report(run: RunModel) -> str:
     verified_rows = [row for row in run.person_opportunities if row.person_id in verified_ids]
     if not verified_rows:
         lines.append("none")
+        historical = [
+            person
+            for person in run.people
+            if person.historical_expertise or person.role_freshness == "historical"
+        ]
+        if historical:
+            lines.append("HISTORICAL CANDIDATES:")
+        for person in historical[:5]:
+            lines.append(
+                f"- {person.name}: role_freshness={person.role_freshness} "
+                f"current_ownership={person.current_ownership or 'unknown'}"
+            )
     evidence_by_id = {item.id: item for item in run.evidence}
     for row in verified_rows:
-        person = next((item for item in run.people if item.id == row.person_id), None)
+        matched = [item for item in run.people if item.id == row.person_id]
+        subject = matched[0] if matched else None
         kind = {
             "problem_owner": "PROBLEM OWNER",
             "access_path": "ACCESS PATH",
             "executive": "EXECUTIVE",
         }[row.person_kind]
-        fit = "not scored" if row.person_fit is None else _fit_line(person) if person else "not scored"
-        footprint = "none" if person is None else ", ".join(person.footprint_topics) or "none"
+        fit = "not scored" if row.person_fit is None else _fit_line(subject) if subject else "not scored"
+        footprint = "none" if subject is None else ", ".join(subject.footprint_topics) or "none"
         support = [
             f"- {evidence_by_id[item_id].source_url} | {evidence_by_id[item_id].excerpt}"
             for item_id in row.supporting_evidence_ids
@@ -128,12 +141,23 @@ def render_live_report(run: RunModel) -> str:
         lines.extend(
             [
                 f"NAME: {row.person_name}",
-                f"TITLE: {row.person_title or 'unknown'}",
+                f"CURRENT ROLE: {row.person_title or 'unknown'}",
+                f"ROLE FRESHNESS: {subject.role_freshness if subject else 'unknown'}",
+                "CURRENT OWNERSHIP: "
+                + (subject.current_ownership if subject and subject.current_ownership else "unknown"),
+                "HISTORICAL EXPERTISE: "
+                + (
+                    "; ".join(subject.historical_expertise)
+                    if subject and subject.historical_expertise
+                    else "none"
+                ),
+                f"TECHNICAL RELEVANCE: {fit}",
+                f"ACCOUNT TRIGGER: {row.account_trigger or 'unknown'}",
+                f"TRIGGER → PERSON LINK: {row.trigger_link or 'none'}",
+                f"PERSON-SPECIFIC TRIGGER: {row.trigger_strength}",
                 f"ROLE / RESPONSIBILITY: {row.person_title or 'unknown'} ({kind})",
                 f"WHY THIS PERSON: {row.angle}",
                 f"TECHNICAL FOOTPRINT: {footprint}",
-                f"PERSON ↔ PROBLEM FIT: {fit}",
-                f"PERSON-SPECIFIC TRIGGER: {row.why_now}",
                 f"WHY NOW: {row.why_now}",
                 f"CONTACTABILITY: {row.contactability.level}",
                 f"REDIS HYPOTHESIS: {row.redis_hypothesis or 'none'}",
@@ -142,7 +166,7 @@ def render_live_report(run: RunModel) -> str:
                 *(support or ["- none"]),
                 "CONTRADICTING EVIDENCE:",
                 *(contra or ["- none"]),
-                "UNKNOWN: " + ("; ".join(person.contradictions) if person and person.contradictions else "none"),
+                "UNKNOWN: " + ("; ".join(subject.contradictions) if subject and subject.contradictions else "none"),
                 f"RECOMMENDED CHANNEL: {row.recommended_channel}",
                 f"PLAYBOOK: {row.template_id or 'none'}",
                 f"DECISION: {row.decision}",
