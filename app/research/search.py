@@ -15,6 +15,7 @@ class SearchHit(BaseModel):
     title: str
     snippet: str
     published_at: str | None = None
+    engine: str = ""
 
 
 @runtime_checkable
@@ -84,6 +85,7 @@ class SearXNGSearchProvider:
         self.retries = retries
         self.budget = budget
         self.calls = 0
+        self._categories = ("general", "it", "science")
         self._transport = transport
 
     def search(self, query: str, limit: int = 3) -> list[SearchHit]:
@@ -113,9 +115,10 @@ class SearXNGSearchProvider:
         last_error = ""
         for attempt in range(self.retries + 1):
             try:
+                category = self._categories[(self.calls - 1) % len(self._categories)]
                 response = await client.get(
                     f"{self.base_url}/search",
-                    params={"q": query, "format": "json"},
+                    params={"q": query, "format": "json", "categories": category},
                 )
                 if response.status_code >= 500:
                     last_error = f"status {response.status_code}"
@@ -144,12 +147,16 @@ def normalize_searxng_results(payload: dict[str, object], *, limit: int) -> list
         if not is_allowed_public_url(url):
             continue
         published = item.get("publishedDate") or item.get("pubdate") or item.get("published_date")
+        engine = item.get("engine") or item.get("engines") or ""
+        if isinstance(engine, list):
+            engine = ",".join(str(part) for part in engine)
         hits.append(
             SearchHit(
                 url=url,
                 title=str(item.get("title", "")),
                 snippet=str(item.get("content", ""))[:240],
                 published_at=published[:10] if isinstance(published, str) and len(published) >= 10 else None,
+                engine=str(engine),
             )
         )
         if len(hits) >= limit:

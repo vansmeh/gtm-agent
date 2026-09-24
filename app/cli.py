@@ -68,6 +68,13 @@ def render_live_report(run: RunModel) -> str:
             or ", ".join(item.label for item in run.functions)
             or function
         ),
+        "DISCOVERY",
+        f"Queries: {run.discovery_queries_used or run.queries_executed}",
+        f"Results examined: {run.results_examined}",
+        f"Names extracted: {run.names_extracted}",
+        f"Duplicates: {run.names_duplicated}",
+        f"Rejected: {run.names_rejected}",
+        f"Retained: {run.candidates_retained}",
         f"QUERIES EXECUTED: {run.queries_executed}",
         f"SEARCH RESULTS EXAMINED: {run.results_examined}",
         f"POTENTIAL NAMES DISCOVERED: {len({lead.name for lead in run.snippet_leads})}",

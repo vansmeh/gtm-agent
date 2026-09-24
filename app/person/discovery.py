@@ -61,6 +61,13 @@ _BLOCK = frozenset(
         "transit",
         "connectivity",
         "cloud",
+        "full",
+        "stack",
+        "leadership",
+        "software",
+        "senior",
+        "interviews",
+        "interview",
     }
 )
 _AT = re.compile(r"\bat ([A-Z][^,.]{2,80})")

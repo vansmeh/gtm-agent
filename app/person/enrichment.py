@@ -68,7 +68,7 @@ def cheap_reject(
         return "stale employment"
     if candidate.published_at is not None and (observed_on - candidate.published_at).days > role_days:
         return "stale employment"
-    if not candidate.name or len(candidate.name.split()) < 2 or not candidate.title:
+    if not candidate.name or len(candidate.name.split()) < 2:
         return "ambiguous identity"
     if functions and any(token in title for token in _IRRELEVANT):
         if not any(function in title or function in candidate.excerpt.lower() for function in functions):

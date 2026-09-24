@@ -243,6 +243,7 @@ class SearchExecution(BaseModel):
     query: str
     result_count: int
     urls: list[str] = Field(default_factory=list)
+    engines: list[str] = Field(default_factory=list)
 
 
 class PersonSearchTrace(BaseModel):
@@ -345,6 +346,10 @@ class RunModel(BaseModel):
     deep_pages_used: int = 0
     candidates_discovered: int = 0
     candidates_rejected: int = 0
+    names_extracted: int = 0
+    names_duplicated: int = 0
+    names_rejected: int = 0
+    candidates_retained: int = 0
     candidates_prioritized: int = 0
     deep_researched_count: int = 0
     queries_executed: int = 0

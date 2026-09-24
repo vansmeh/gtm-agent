@@ -44,6 +44,7 @@ from app.person.artifact_discovery import (
     team_follow_up_queries,
     teams_in_text,
 )
+from app.person.candidate_generation import extract_names, recall_queries
 from app.person.discovery import discover_mentions
 from app.person.enrichment import (
     CandidateView,
@@ -253,7 +254,9 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             person_discovery_queries(run.account_name, run.domain, function_label, signal_label)
             + hypothesis_queries(run.account_name, run.person_hypotheses)
         )[: deps.discovery_query_budget]
-        if run.signals:
+        if run.affected_functions:
+            queries = recall_queries(run.account_name, run.domain, run.affected_functions) + queries
+        elif run.signals:
             queries = artifact_queries(run.account_name, run.domain, signal_label)[:6] + queries
         collected: list[tuple[int, str, str | None]] = []
         seen_hits: set[str] = set()
@@ -329,8 +332,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     _ingest_page(run, deps, hit.url, hit.published_at, person_slot="discovery")
                     fetched_functions += 1
             mentions = discover_mentions(run.observations, run.account_name)
-        per_function = 10
-        cap = per_function * max(1, len(run.affected_functions))
+        cap = 50
         views = [
             CandidateView(
                 name=mention.name,
@@ -342,6 +344,21 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             )
             for mention in mentions[:cap]
         ]
+        known_names = {item.name for item in views}
+        for lead in run.snippet_leads:
+            if lead.name in known_names or len(views) >= cap:
+                continue
+            known_names.add(lead.name)
+            views.append(
+                CandidateView(
+                    name=lead.name,
+                    title=lead.title,
+                    company=run.account_name,
+                    url=lead.url,
+                    excerpt=lead.excerpt,
+                    published_at=None,
+                )
+            )
         kept: list[CandidateView] = []
         for view in views:
             reason = cheap_reject(
@@ -371,6 +388,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
         )
         run.candidates_discovered = len(views)
         run.candidates_rejected = len(views) - len(kept)
+        run.candidates_retained = len(kept)
         run.candidates_prioritized = len(prioritized)
         deep_names = [item.name for item in prioritized[:5]]
         _verify_snippet_leads(run, deps, mentions, only=set(deep_names))
@@ -435,8 +453,8 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     _ingest_page(run, deps, hit.url, hit.published_at, person_slot="deep")
             run.deep_researched_count += 1
         if deep_names:
-            lead = deep_names[0]
-            check_query = f"{lead} {run.account_name} former OR previously"
+            lead_name = deep_names[0]
+            check_query = f"{lead_name} {run.account_name} former OR previously"
             if run.verification_queries_used < run.verification_query_budget:
                 check = deps.search.search(check_query, limit=3)
                 run.verification_queries_used += 1
@@ -632,13 +650,40 @@ def _note_search(run: RunModel, query: str, hits: Sequence[object]) -> None:
     typed = [hit for hit in hits if isinstance(hit, SearchHit)]
     run.queries_executed += 1
     run.results_examined += len(typed)
-    run.search_log.append(SearchExecution(query=query, result_count=len(typed), urls=[hit.url for hit in typed]))
+    run.search_log.append(
+        SearchExecution(
+            query=query,
+            result_count=len(typed),
+            urls=[hit.url for hit in typed],
+            engines=[hit.engine for hit in typed if hit.engine],
+        )
+    )
 
 
 def _record_snippet_leads(run: RunModel, hits: Sequence[object], query: str) -> None:
     from app.research.search import SearchHit
 
     typed = [hit for hit in hits if isinstance(hit, SearchHit)]
+    extracted, raw_count, rejected_count, duplicates = extract_names(typed, run.account_name, run.domain)
+    run.names_extracted += raw_count
+    run.names_rejected += rejected_count
+    run.names_duplicated += duplicates
+    for item in extracted:
+        if any(lead.name == item.name and lead.url == item.url for lead in run.snippet_leads):
+            continue
+        run.snippet_leads.append(
+            SnippetLead(name=item.name, title=item.title, url=item.url, excerpt=item.excerpt, query=query)
+        )
+        run.person_traces.append(
+            PersonSearchTrace(
+                query=query,
+                candidate=item.name,
+                source=item.url,
+                finding=f"{item.tier}: {item.excerpt[:160]}",
+                decision="accept",
+                reason="plausible name connected to the company in a public search result",
+            )
+        )
     for mention in candidates_from_hits(typed, run.account_name, query):
         if any(lead.name == mention.name and lead.url == mention.url for lead in run.snippet_leads):
             continue
