@@ -5,7 +5,7 @@ from pathlib import Path
 
 from app.config import Settings
 from app.db.session import init_db, make_engine, make_session_factory, session_scope
-from app.domain.models import Evidence, PersonHypothesis, TechnicalSignal, WhyNowEvent
+from app.domain.models import Evidence, Observation, PersonHypothesis, TechnicalSignal, WhyNowEvent
 from app.laya.adapter import default_kernel
 from app.opportunity.person_opportunity import (
     apply_why_now,
@@ -13,6 +13,7 @@ from app.opportunity.person_opportunity import (
     hypotheses_for,
     research_gap,
 )
+from app.person.discovery import discover_mentions
 from app.pipeline import PLAYBOOK_PATH, execute_run
 from app.playbook.selection import load_playbook
 from app.research.bounds import person_discovery_queries, source_rank
@@ -167,3 +168,24 @@ def test_c_suite_candidate_is_rejected_with_a_reason(tmp_path: Path) -> None:
     assert "C-suite" in rejected[0].reason or "responsibility" in rejected[0].reason
     assert all(person.selection_status != "verified_person" for person in run.people)
     assert run.next_research_question.startswith("Find current Northwind")
+
+
+def test_product_headings_are_not_people() -> None:
+    obs = Observation(
+        id="o",
+        url="https://www.cloudflare.com/learning/",
+        title="Cloudflare",
+        source_type="blog",
+        published_at=date(2026, 8, 1),
+        observed_at=datetime(2026, 9, 24, tzinfo=UTC),
+        text_sha256="x",
+        sanitized_text=(
+            "Our Connectivity Cloud architect published a note. "
+            "Cloudflare Magic Transit Architect describes the network. "
+            "By Ada Lovelace, Staff Engineer at Cloudflare."
+        ),
+        poisoned=False,
+        cycle=1,
+    )
+    names = {item.name for item in discover_mentions([obs], "Cloudflare")}
+    assert names == {"Ada Lovelace"}

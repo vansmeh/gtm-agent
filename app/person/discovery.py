@@ -52,6 +52,15 @@ _BLOCK = frozenset(
         "protection",
         "partner",
         "source",
+        "our",
+        "this",
+        "their",
+        "performance",
+        "reference",
+        "magic",
+        "transit",
+        "connectivity",
+        "cloud",
     }
 )
 _AT = re.compile(r"\bat ([A-Z][^,.]{2,80})")
@@ -100,6 +109,8 @@ def discover_mentions(observations: list[Observation], account_name: str) -> lis
             if _anchored_elsewhere(sentence, account):
                 continue
             for name, title in _names_in(sentence):
+                if any(part.lower() == account or account in part.lower() for part in name.split()):
+                    continue
                 key = (name, title, obs.url)
                 if key in seen:
                     continue
