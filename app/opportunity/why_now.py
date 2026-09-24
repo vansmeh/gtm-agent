@@ -14,6 +14,7 @@ _EVENTS: tuple[tuple[str, str, frozenset[str]], ...] = (
     ("migration", "Migration", frozenset({"migration"})),
     ("scale_expansion", "Scale expansion", frozenset({"scale_expansion"})),
     ("ai_initiative", "AI initiative", frozenset({"ai_search", "rag"})),
+    ("public_interview", "Public interview or talk", frozenset({"public_interview"})),
 )
 
 

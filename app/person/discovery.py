@@ -10,7 +10,7 @@ _TITLE = (
     r"(?:Head of|VP|Vice President(?: of)?|Director of|Chief|CEO|CTO|CIO|CPO|"
     r"Co-Founder|Founder|SVP|EVP|President|Principal|Staff|Distinguished|"
     r"Engineering Manager|Engineering Lead|Tech Lead|Lead Engineer|"
-    r"Software Engineer|Architect|Evangelist|Advocate)"
+    r"Software Engineer|Architect|Evangelist|Advocate|Engineering VPs?)"
 )
 _PREFIX = r"(?:senior |staff |principal |lead |distinguished |software ){0,3}"
 _NAME = r"([A-Z][a-z]+(?: [A-Z][a-z]+){1,2})"
@@ -45,6 +45,13 @@ _BLOCK = frozenset(
         "director",
         "vice",
         "president",
+        "data",
+        "systems",
+        "distributed",
+        "solutions",
+        "protection",
+        "partner",
+        "source",
     }
 )
 _AT = re.compile(r"\bat ([A-Z][^,.]{2,80})")

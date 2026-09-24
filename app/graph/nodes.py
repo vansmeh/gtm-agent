@@ -1,11 +1,13 @@
 """Pipeline nodes. Each one reads evidence already on the run and writes structured results."""
 
+import re
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
 from app.domain.models import (
+    Evidence,
     PersonRecord,
     PersonSearchTrace,
     Recommendation,
@@ -309,6 +311,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             mentions = discover_mentions(run.observations, run.account_name)
         people: list[PersonRecord] = []
         for identity in identities_from_mentions(mentions, run.account_name, observed_on=observed_on):
+            _attach_ownership_window(run, identity.name)
             status, responsibility_lines = classify_responsibility(
                 identity.name, identity.title, run.evidence, function_label
             )
@@ -360,6 +363,49 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
         return dump_run(run)
 
     return node
+
+
+def _attach_ownership_window(run: RunModel, name: str) -> None:
+    """Keep a short public window when ownership is split across neighboring sentences."""
+    from app.research.extract import classify_sentence
+
+    for obs in run.observations:
+        text = obs.sanitized_text
+        idx = text.find(name)
+        if idx < 0:
+            continue
+        window = " ".join(text[idx : idx + 700].split())
+        if "teams are building" not in window.lower():
+            continue
+        topics, supports, contradicts, gap = classify_sentence(window)
+        if not topics:
+            continue
+        already = [
+            item
+            for item in run.evidence
+            if name in item.excerpt and item.source_url == obs.url and len(item.excerpt) > 240
+        ]
+        if already:
+            return
+        run.evidence.append(
+            Evidence(
+                id=str(uuid.uuid4()),
+                observation_id=obs.id,
+                excerpt=window[:500],
+                source_url=obs.url,
+                source_title=obs.title,
+                source_type=obs.source_type,
+                published_at=obs.published_at,
+                observed_at=obs.observed_at,
+                confidence=0.62,
+                lineage=[obs.id],
+                topics=topics,
+                supports_problem=supports,
+                contradicts_redis=contradicts,
+                is_explicit_gap=gap,
+            )
+        )
+        return
 
 
 def _note_search(run: RunModel, query: str, hits: Sequence[object]) -> None:
@@ -419,8 +465,12 @@ def _verify_snippet_leads(run: RunModel, deps: PipelineDeps, mentions: Sequence[
         query = f'"{lead.name}" {run.account_name}'
         hits = deps.search.search(query, limit=3)
         _note_search(run, query, hits)
+        if lead.url not in run.fetched_urls and run.person_pages_used < run.person_page_budget:
+            _ingest_page(run, deps, lead.url, None, person_slot=True)
         fresh = [hit for hit in hits if hit.url not in run.fetched_urls and hit.url != lead.url]
-        for hit in fresh[:2]:
+        for hit in fresh[:1]:
+            if run.person_pages_used >= run.person_page_budget:
+                break
             _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
         run.person_traces.append(
             PersonSearchTrace(
@@ -448,6 +498,8 @@ def research_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
 
     def node(state: GraphState) -> GraphState:
         run = load_run(state)
+        run.signals = detect_signals(run.evidence)
+        run.functions = detect_functions(run.evidence) or run.functions
         _log(run, "people", f"Technical footprint recorded for {len(run.people)} people.")
         return dump_run(run)
 

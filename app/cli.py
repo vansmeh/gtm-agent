@@ -151,7 +151,8 @@ def render_live_report(run: RunModel) -> str:
     primary = next((row for row in run.person_opportunities if row.thread_role == "primary_contact"), None)
     secondary = next((row for row in run.person_opportunities if row.thread_role == "secondary_contact"), None)
     executive = next((row for row in run.person_opportunities if row.thread_role == "executive_thread"), None)
-    if primary is None and secondary is None and executive is None:
+    verified = [person for person in run.people if person.selection_status == "verified_person"]
+    if not verified or (primary is None and secondary is None and executive is None):
         lines.append("NO ACTIONABLE PERSON OPPORTUNITY")
     else:
         lines.append("PRIMARY CONTACT: " + (primary.person_name if primary else "none"))

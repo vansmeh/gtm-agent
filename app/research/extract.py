@@ -47,6 +47,7 @@ _RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     ("vector_search", re.compile(r"vector search", re.I)),
+    ("public_interview", re.compile(r"\b(interview|spotlight|technical talk)\b", re.I)),
 )
 
 

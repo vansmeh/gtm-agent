@@ -5,7 +5,7 @@ import re
 from app.domain.models import Evidence
 
 _VERB = re.compile(
-    r"\b(owns|owned|leads|lead|leading|responsible|heads|runs|directs|oversees)\b",
+    r"\b(owns|owned|leads|lead|leading|responsible|heads|runs|directs|oversees|teams are building)\b",
     re.I,
 )
 _TOPIC = re.compile(
