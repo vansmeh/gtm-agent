@@ -1,0 +1,19 @@
+{
+  "name": "redis-gtm-agent",
+  "user": "ubuntu",
+  "install": "bash scripts/install.sh",
+  "start": "bash scripts/start-redis.sh",
+  "terminals": [
+    {
+      "name": "api",
+      "command": "source .venv/bin/activate && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    },
+    {
+      "name": "redis-logs",
+      "command": "touch /tmp/redis/redis.log && tail -f /tmp/redis/redis.log"
+    }
+  ],
+  "ports": [
+    { "name": "api", "port": 8000 }
+  ]
+}
