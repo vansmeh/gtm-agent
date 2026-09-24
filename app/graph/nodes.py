@@ -317,6 +317,28 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             for hit in check[:1]:
                 _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
             mentions = discover_mentions(run.observations, run.account_name)
+        if not run.affected_functions:
+            run.signals = detect_signals(run.evidence) or run.signals
+            label = " ".join(item.label for item in run.signals[:2])
+            run.affected_functions = affected_functions(label) if run.signals else []
+            fetched_functions = 0
+            owner_queries = (
+                function_owner_queries(run.account_name, run.domain, run.affected_functions)[:4]
+                if run.affected_functions
+                else []
+            )
+            for query in owner_queries:
+                hits = deps.search.search(query, limit=4)
+                _note_search(run, query, hits)
+                _record_snippet_leads(run, hits, query)
+                for hit in hits:
+                    if fetched_functions >= 2 or not is_allowed_public_url(hit.url):
+                        continue
+                    if hit.url in run.fetched_urls:
+                        continue
+                    _ingest_page(run, deps, hit.url, hit.published_at, person_slot=True)
+                    fetched_functions += 1
+            mentions = discover_mentions(run.observations, run.account_name)
         people: list[PersonRecord] = []
         for identity in identities_from_mentions(mentions, run.account_name, observed_on=observed_on):
             _attach_ownership_window(run, identity.name)
