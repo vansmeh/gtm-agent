@@ -14,7 +14,7 @@ _SPEAKER = re.compile(rf"\b(?:Speaker|Presented by|Talk by)\s*:?\s+{_NAME}\b")
 _CONTRIBUTOR = re.compile(rf"\b(?:Contributor|Contributed by|Authored by)\s*:?\s+{_NAME}\b")
 _INTERVIEW = re.compile(rf"\b(?:Interview with|Interviewee)\s*:?\s+{_NAME}\b")
 _PROSE = re.compile(rf"\b{_NAME}\s+(?:wrote|presented|authored)\b")
-_MENTION = re.compile(rf"\b{_NAME}\b")
+_MENTION = re.compile(rf"\b(?:thanked|names|features|interviewed|introduced)\s+{_NAME}\b")
 _STRONG = frozenset({"author", "speaker", "contributor"})
 
 
@@ -48,10 +48,9 @@ def attributions_in(text: str, url: str) -> list[tuple[str, str]]:
             found.append((name, relationship))
     for match in _MENTION.finditer(text):
         name = match.group(1)
-        kind = classify_entity(name, text)
-        if name.lower() in seen or kind in {"ORG", "PRODUCT", "TITLE", "DOCUMENT"}:
+        if name.lower() in seen or not _person_shaped(name):
             continue
-        if kind == "UNKNOWN" and not _person_shaped(name):
+        if classify_entity(name, text) in {"ORG", "PRODUCT", "TITLE", "DOCUMENT"}:
             continue
         seen.add(name.lower())
         found.append((name, "mentioned_person"))
