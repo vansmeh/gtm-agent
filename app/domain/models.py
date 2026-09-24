@@ -114,7 +114,21 @@ class PersonRecord(BaseModel):
     candidate_class: Literal[
         "technical_owner", "technical_influencer", "manager", "executive", "unknown"
     ] = "unknown"
-    currentness: Literal["current", "recently_changed", "historical", "unknown"] = "unknown"
+    currentness: Literal["current", "probable_current", "recently_changed", "historical", "unknown"] = "unknown"
+    affiliation: Literal["current", "probable", "historical", "unknown"] = "unknown"
+    affiliation_evidence_ids: list[str] = Field(default_factory=list)
+    role_state: Literal["current", "probable_current", "historical", "unknown"] = "unknown"
+    function_level: Literal["explicit", "strong", "probable", "weak", "unknown"] = "unknown"
+    person_function_evidence_ids: list[str] = Field(default_factory=list)
+    technical_activity: Literal["strong", "historical", "unknown"] = "unknown"
+    activity_evidence_ids: list[str] = Field(default_factory=list)
+    candidate_state: Literal[
+        "verified_current_owner",
+        "verified_current_person",
+        "probable_current_person",
+        "historical_person",
+        "rejected",
+    ] = "rejected"
     candidate_priority_reason: str = ""
     deep_researched: bool = False
     next_query: str = ""
@@ -229,6 +243,10 @@ class OwnershipLink(BaseModel):
     current_function: str
     ownership_level: str
     evidence_ids: list[str] = Field(default_factory=list)
+    affiliation: str = ""
+    role_state: str = ""
+    function_level: str = ""
+    technical_activity: str = ""
 
 
 class SnippetLead(BaseModel):

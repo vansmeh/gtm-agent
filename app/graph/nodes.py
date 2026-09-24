@@ -45,6 +45,7 @@ from app.person.artifact_discovery import (
     teams_in_text,
 )
 from app.person.candidate_generation import extract_names, recall_queries
+from app.person.current_affiliation import current_role_search_queries, resolve_affiliation
 from app.person.discovery import discover_mentions
 from app.person.enrichment import (
     CandidateView,
@@ -406,7 +407,8 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
         for view in prioritized[:5]:
             if run.verification_queries_used >= run.verification_query_budget:
                 break
-            for query in profile_queries(view.name, run.account_name, run.affected_functions)[:2]:
+            role_queries = current_role_search_queries(view.name, run.account_name, run.domain)
+            for query in role_queries[:3] + profile_queries(view.name, run.account_name, run.affected_functions)[:1]:
                 if run.verification_queries_used >= run.verification_query_budget:
                     break
                 hits = deps.search.search(query, limit=3)
@@ -523,6 +525,35 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 observed_on=observed_on,
                 functions=run.affected_functions,
             )
+            affiliation = resolve_affiliation(
+                identity.name,
+                identity.title,
+                run.evidence,
+                account_name=run.account_name,
+                domain=run.domain,
+                functions=run.affected_functions or ["platform"],
+                observed_on=observed_on,
+            )
+            record.affiliation = affiliation.affiliation  # type: ignore[assignment]
+            record.affiliation_evidence_ids = affiliation.affiliation_evidence_ids
+            record.role_state = affiliation.role_state  # type: ignore[assignment]
+            record.function_level = affiliation.function_level  # type: ignore[assignment]
+            record.person_function_evidence_ids = affiliation.function_evidence_ids
+            record.technical_activity = affiliation.technical_activity  # type: ignore[assignment]
+            record.activity_evidence_ids = affiliation.activity_evidence_ids
+            record.candidate_state = affiliation.candidate_state  # type: ignore[assignment]
+            if affiliation.role_state == "probable_current" and record.validity == "stale":
+                record.validity = "unknown"
+                record.role_freshness = "unknown"
+            if affiliation.ownership_level == "strong" and level not in {"explicit", "strong"}:
+                level = "strong"
+                evidence_ids = affiliation.ownership_evidence_ids
+            elif affiliation.ownership_level == "probable" and level in {"unknown", "weak"}:
+                level = "probable"
+                evidence_ids = affiliation.ownership_evidence_ids or evidence_ids
+            elif affiliation.ownership_level == "weak" and level == "unknown":
+                level = "weak"
+                evidence_ids = evidence_ids or affiliation.ownership_evidence_ids
             if level not in {"explicit", "strong"}:
                 converged, converged_ids = converge_ownership(
                     identity.name,
@@ -544,6 +575,10 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                 text=identity.excerpt,
                 observed_on=observed_on,
             )
+            if record.role_state == "probable_current":
+                record.currentness = "probable_current"
+            elif record.role_state == "current":
+                record.currentness = "current"
             record.candidate_priority_reason = priority_by_name.get(identity.name, "")
             record.deep_researched = identity.name in researched
             if record.deep_researched and record.ownership_level not in {"explicit", "strong"}:
@@ -599,6 +634,13 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     "unknown",
                 ),
                 evidence_ids=[item.evidence_id],
+                affiliation=next((person.affiliation for person in people if person.name == item.author), ""),
+                role_state=next((person.role_state for person in people if person.name == item.author), ""),
+                function_level=next((person.function_level for person in people if person.name == item.author), ""),
+                technical_activity=next(
+                    (person.technical_activity for person in people if person.name == item.author),
+                    "",
+                ),
             )
             for item in run.artifacts
         ]

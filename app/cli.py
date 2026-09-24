@@ -85,8 +85,16 @@ def render_live_report(run: RunModel) -> str:
         f"CANDIDATES REJECTED: {run.candidates_rejected}",
         f"CANDIDATES PRIORITIZED: {run.candidates_prioritized}",
         f"DEEP-RESEARCHED: {run.deep_researched_count}",
+        "CURRENT AFFILIATIONS RESOLVED: "
+        + str(len([person for person in run.people if person.affiliation in {"current", "probable"}])),
+        "CURRENT ROLES RESOLVED: "
+        + str(len([person for person in run.people if person.role_state in {"current", "probable_current"}])),
+        "CURRENT FUNCTIONS RESOLVED: "
+        + str(len([person for person in run.people if person.function_level in {"explicit", "strong", "probable"}])),
+        "STRONG OWNERSHIP CANDIDATES: "
+        + str(len([person for person in run.people if person.ownership_level == "strong"])),
         "CURRENT OWNERS VERIFIED: "
-        + str(len([person for person in run.people if person.ownership_level in {"explicit", "strong"}])),
+        + str(len([person for person in run.people if person.candidate_state == "verified_current_owner"])),
         "ACTIONABLE OPPORTUNITIES: "
         + str(len([row for row in run.person_opportunities if row.decision == "contact_now"])),
         *[
@@ -123,12 +131,16 @@ def render_live_report(run: RunModel) -> str:
             "\n".join(
                 [
                     f"NAME: {person.name}",
+                    f"CURRENT AFFILIATION: {person.affiliation}",
                     f"CURRENT ROLE: {person.title or 'unknown'}",
-                    f"CURRENTNESS: {person.currentness}",
-                    f"FUNCTION: {person.function_guess or 'unknown'}",
-                    "TECHNICAL FOOTPRINT: " + (", ".join(person.footprint_topics) or "none"),
+                    f"ROLE STATE: {person.role_state}",
+                    "ROLE EVIDENCE: " + (", ".join(person.affiliation_evidence_ids) or "none"),
+                    f"CURRENT FUNCTION: {person.function_level}",
+                    "FUNCTION EVIDENCE: " + (", ".join(person.person_function_evidence_ids) or "none"),
+                    f"TECHNICAL ACTIVITY: {person.technical_activity}",
                     f"OWNERSHIP LEVEL: {person.ownership_level}",
                     "OWNERSHIP EVIDENCE: " + (", ".join(person.ownership_evidence_ids) or "none"),
+                    f"CANDIDATE STATE: {person.candidate_state}",
                     f"PRIORITY: {person.candidate_priority_reason or 'not prioritized'}",
                     f"WHY NOW: {person.current_ownership or 'unknown'}",
                     f"DECISION: {'deep-researched' if person.deep_researched else 'not deep-researched'}",
