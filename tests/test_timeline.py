@@ -258,8 +258,10 @@ def test_account_trigger_links_to_function_not_the_person() -> None:
         "current_function",
         "technical_responsibility",
         "account_trigger",
+        "technical_expertise",
+        "ownership",
     ]
-    trigger = edges[-1]
+    trigger = next(edge for edge in edges if edge.relation == "account_trigger")
     assert trigger.target == "low-latency serving"
     assert trigger.evidence_ids == ["trigger-1"]
     assert "Ada Lovelace" not in trigger.target

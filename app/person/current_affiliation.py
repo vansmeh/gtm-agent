@@ -60,7 +60,11 @@ def resolve_affiliation(
     company = [item for item in named if _company_source(item, account_name, domain)]
     recent_company = [item for item in company if _recent(item, observed_on)]
     old_company = [item for item in company if item not in recent_company and _dated(item, observed_on)]
-    activity = [item for item in named if _recent(item, observed_on) and _technical(item, functions)]
+    activity = [
+        item
+        for item in named
+        if _recent(item, observed_on) and _technical(item, functions) and not _interviewee_only(item, name)
+    ]
     company_activity = [item for item in activity if item in company]
     roles = [item for item in named if _states_role(item, title)]
     recent_roles = [item for item in roles if _recent(item, observed_on) or _undated_org(item)]
@@ -176,6 +180,7 @@ def evidence_graph(
             source=name,
             target=result.affiliation,
             relation="current_affiliation",
+            evidence_type="affiliation",
             evidence_ids=result.affiliation_evidence_ids,
             confidence=0.7 if result.affiliation == "current" else 0.45,
             observed_on=observed_on,
@@ -188,6 +193,7 @@ def evidence_graph(
             source=result.affiliation,
             target=result.role_state,
             relation="current_role",
+            evidence_type="current_role",
             evidence_ids=result.role_evidence_ids,
             confidence=0.8 if result.role_state == "current" else 0.5,
             observed_on=observed_on,
@@ -200,6 +206,7 @@ def evidence_graph(
             source=result.role_state,
             target=result.function_level,
             relation="current_function",
+            evidence_type="function",
             evidence_ids=result.function_evidence_ids,
             confidence=0.75 if result.function_level == "strong" else 0.4,
             observed_on=observed_on,
@@ -212,6 +219,7 @@ def evidence_graph(
             source=result.function_level,
             target=responsibility,
             relation="technical_responsibility",
+            evidence_type="technical_responsibility",
             evidence_ids=result.function_evidence_ids,
             confidence=0.6 if result.function_level == "strong" else 0.35,
             observed_on=observed_on,
@@ -223,8 +231,33 @@ def evidence_graph(
                 source=responsibility,
                 target=trigger,
                 relation="account_trigger",
+                evidence_type="account_trigger",
                 evidence_ids=trigger_evidence_ids,
                 confidence=0.7 if trigger_evidence_ids else 0.3,
+                observed_on=observed_on,
+            )
+        )
+    if result.technical_activity != "unknown":
+        edges.append(
+            EvidenceEdge(
+                source=name,
+                target=result.technical_activity,
+                relation="technical_expertise",
+                evidence_type="technical_attribution",
+                evidence_ids=result.activity_evidence_ids,
+                confidence=0.7 if result.technical_activity == "strong" else 0.35,
+                observed_on=observed_on,
+            )
+        )
+    if result.ownership_level != "unknown":
+        edges.append(
+            EvidenceEdge(
+                source=name,
+                target=result.ownership_level,
+                relation="ownership",
+                evidence_type="ownership",
+                evidence_ids=result.ownership_evidence_ids,
+                confidence=0.8 if result.ownership_level == "strong" else 0.4,
                 observed_on=observed_on,
             )
         )
@@ -271,6 +304,13 @@ def _recent(item: Evidence, observed_on: date) -> bool:
 
 def _dated(item: Evidence, observed_on: date) -> bool:
     return item.published_at is not None and not _recent(item, observed_on)
+
+
+def _interviewee_only(item: Evidence, name: str) -> bool:
+    if item.evidence_type == "interviewee":
+        return True
+    text = item.excerpt.lower()
+    return f"hosting {name.lower()}" in text or text.startswith("interview with")
 
 
 def _technical(item: Evidence, functions: list[str]) -> bool:

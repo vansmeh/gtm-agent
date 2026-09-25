@@ -57,6 +57,14 @@ def render_live_report(run: RunModel) -> str:
         f"SEARCH URL: {run.search_endpoint or 'none'}",
         f"TOTAL QUERIES: {run.queries_executed}",
         f"TOTAL RESULTS: {run.results_examined}",
+        "TIER_A: "
+        + str(sum(row.opportunity_tier == "TIER_A_VERIFIED_OWNER" for row in run.person_opportunities)),
+        "TIER_B: "
+        + str(sum(row.opportunity_tier == "TIER_B_PROBABLE_OWNER" for row in run.person_opportunities)),
+        "TIER_C: "
+        + str(sum(row.opportunity_tier == "TIER_C_RELEVANT_PERSON" for row in run.person_opportunities)),
+        "TIER_D: "
+        + str(sum(row.opportunity_tier == "TIER_D_INSUFFICIENT" for row in run.person_opportunities)),
         f"ACCOUNT: {run.account_name}",
         "TECHNICAL SIGNAL: " + signal,
         "TECHNICAL SIGNALS: " + (", ".join(item.label for item in run.signals) or signal),
@@ -157,11 +165,14 @@ def render_live_report(run: RunModel) -> str:
         candidate_lines.append(
             "\n".join(
                 [
+                    f"DISCOVERED PERSONS: {person.name}",
                     f"NAME: {person.name}",
+                    f"SOURCE: {person.candidate_source_type or 'unknown'}",
                     f"CURRENT AFFILIATION: {person.affiliation}",
                     f"CURRENT ROLE: {person.title or 'unknown'}",
                     f"ROLE STATE: {person.role_state}",
-                    "ROLE EVIDENCE: " + (", ".join(person.role_evidence_ids) or "none"),
+                    "CURRENT ROLE EVIDENCE: " + (", ".join(person.role_evidence_ids) or "none"),
+                    f"TECHNICAL ATTRIBUTION: {person.technical_activity}",
                     f"CURRENT FUNCTION: {person.function_level}",
                     "FUNCTION EVIDENCE: " + (", ".join(person.person_function_evidence_ids) or "none"),
                     f"TECHNICAL ARTIFACT: {person.technical_activity}",

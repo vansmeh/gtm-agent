@@ -177,7 +177,13 @@ def _ingest_page(
         _log(run, "extract", f"Quarantined untrusted instructions at {url}.")
         return
     found = extract_evidence(observation)
+    from app.research.structured import evidence_from_facts
+
+    meta = evidence_from_facts(page.facts, observed_at=deps.observed_at, observation_id=observation.id)
+    run.structured_facts.extend(page.facts)
     run.evidence.extend(found)
+    run.evidence.extend(meta)
+    found = found + meta
     _log(run, "extract", f"Extracted {len(found)} evidence items from {url}.")
 
 
@@ -552,6 +558,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             record.affiliation = affiliation.affiliation  # type: ignore[assignment]
             record.affiliation_evidence_ids = affiliation.affiliation_evidence_ids
             record.role_state = affiliation.role_state  # type: ignore[assignment]
+            record.candidate_source_type = _candidate_source(identity.name, run.evidence)
             record.role_evidence_ids = affiliation.role_evidence_ids
             record.function_level = affiliation.function_level  # type: ignore[assignment]
             record.person_function_evidence_ids = affiliation.function_evidence_ids
@@ -744,6 +751,38 @@ def _attach_ownership_window(run: RunModel, name: str) -> None:
         return
 
 
+def _discovery_lineage(query: str, hits: Sequence[object], url: str) -> list[str]:
+    from app.research.search import SearchHit
+
+    matched = next((hit for hit in hits if isinstance(hit, SearchHit) and hit.url == url), None)
+    provider = matched.provider if matched is not None else ""
+    lineage = ["search_snippet", f"query:{query}"]
+    if provider:
+        lineage.append(f"provider:{provider}")
+    return lineage
+
+
+def _candidate_source(name: str, evidence: list[Evidence]) -> str:
+    named = [item for item in evidence if name in item.excerpt or name in item.value]
+    if any(item.source_type == "search_snippet" for item in named):
+        return "search_snippet"
+    if any(item.field == "team_member" or item.source_type == "biography" for item in named):
+        return "team_page"
+    if any(item.evidence_type == "speaker_metadata" or item.source_type == "conference" for item in named):
+        return "speaker_page"
+    if any("github.com" in item.source_url for item in named):
+        return "github"
+    if any(item.evidence_type == "interviewee" or "hosting " in item.excerpt.lower() for item in named):
+        return "interview"
+    if any(item.source_type == "job_posting" for item in named):
+        return "job_posting"
+    if any(item.evidence_type in {"author_metadata", "json_ld"} for item in named):
+        return "technical_artifact"
+    if any(item.source_type in {"blog", "engineering_blog", "company_news"} for item in named):
+        return "company_page"
+    return ""
+
+
 def _note_search(run: RunModel, query: str, hits: Sequence[object]) -> None:
     from app.research.search import SearchHit
 
@@ -844,13 +883,31 @@ def _record_snippet_leads(run: RunModel, hits: Sequence[object], query: str) -> 
                 published_at=mention.published_at,
                 observed_at=run.observed_at,
                 confidence=0.45,
-                lineage=[],
+                lineage=_discovery_lineage(query, typed, mention.url),
                 topics=[],
                 supports_problem=False,
                 contradicts_redis=False,
                 is_explicit_gap=False,
+                evidence_type="search_snippet",
+                field="discovery",
+                raw_text=mention.excerpt[:240],
             )
         )
+    from app.research.structured import snippet_role_facts
+
+    for hit in typed:
+        for fact in snippet_role_facts(
+            title=hit.title,
+            snippet=hit.snippet,
+            url=hit.url,
+            account_name=run.account_name,
+            observed_at=run.observed_at,
+            provider=hit.provider,
+            query=query,
+        ):
+            if any(item.id == fact.id for item in run.evidence):
+                continue
+            run.evidence.append(fact)
 
 
 def _verify_snippet_leads(

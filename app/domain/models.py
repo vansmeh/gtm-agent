@@ -52,6 +52,20 @@ class Evidence(BaseModel):
     supports_problem: bool
     contradicts_redis: bool
     is_explicit_gap: bool
+    evidence_type: str = "body"
+    field: str = ""
+    value: str = ""
+    raw_text: str = ""
+
+
+class StructuredFact(BaseModel):
+    evidence_type: str
+    source_url: str
+    field: str
+    value: str
+    raw_text: str
+    confidence: float = 0.0
+    sentence: str = ""
 
 
 class TechnicalSignal(BaseModel):
@@ -140,6 +154,7 @@ class PersonRecord(BaseModel):
         "historical_person",
         "rejected",
     ] = "rejected"
+    candidate_source_type: str = ""
     candidate_priority_reason: str = ""
     deep_researched: bool = False
     next_query: str = ""
@@ -259,6 +274,7 @@ class EvidenceEdge(BaseModel):
     source: str
     target: str
     relation: str
+    evidence_type: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
     confidence: float = 0.0
     observed_on: date | None = None
@@ -429,6 +445,7 @@ class RunModel(BaseModel):
     search_endpoint: str = ""
     search_log: list[SearchExecution] = Field(default_factory=list)
     search_traces: list[SearchTrace] = Field(default_factory=list)
+    structured_facts: list[StructuredFact] = Field(default_factory=list)
     artifact_links: list[ArtifactPersonLink] = Field(default_factory=list)
     person_pages_used: int = 0
     person_outcome: Literal["verified_person", "weak_candidate", "no_verified_person"] = "no_verified_person"

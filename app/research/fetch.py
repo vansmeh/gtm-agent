@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
+from app.domain.models import StructuredFact
 from app.research.search import DocumentRecord, is_allowed_public_url
 
 
@@ -17,6 +18,7 @@ class FetchedPage(BaseModel):
     published_at: date | None
     status: str
     error: str = ""
+    facts: list[StructuredFact] = []
 
 
 def classify_source_type(url: str) -> str:
@@ -150,6 +152,11 @@ class HttpxPageFetcher:
         if not extracted:
             soup = BeautifulSoup(html, "lxml")
             extracted = soup.get_text(" ", strip=True)[:8000]
+        from app.research.structured import extract_structured
+
+        facts = extract_structured(html, final)
+        if facts:
+            extracted = (extracted + "\n" + "\n".join(fact.sentence for fact in facts if fact.sentence))[:8000]
         host = urlparse(final).hostname or "web"
         return FetchedPage(
             url=final,
@@ -157,6 +164,7 @@ class HttpxPageFetcher:
             text=extracted,
             source_type=classify_source_type(final),
             published_at=published,
-            status="ok" if extracted else "error",
-            error="" if extracted else "no text extracted",
+            status="ok" if extracted or facts else "error",
+            error="" if extracted or facts else "no text extracted",
+            facts=facts,
         )

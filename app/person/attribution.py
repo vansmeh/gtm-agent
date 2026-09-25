@@ -13,7 +13,7 @@ _AUTHOR = re.compile(rf"\b(?:By|Written by|Author)\s*:?\s+{_NAME}\b")
 _SPEAKER = re.compile(rf"\b(?:Speaker|Presented by|Talk by)\s*:?\s+{_NAME}\b")
 _CONTRIBUTOR = re.compile(rf"\b(?:Contributor|Contributed by|Authored by)\s*:?\s+{_NAME}\b")
 _INTERVIEW = re.compile(rf"\b(?:Interview with|Interviewee|hosting)\s*:?\s+{_NAME}\b")
-_PROSE = re.compile(rf"\b{_NAME}\s+(?:wrote|presented|authored)\b")
+_PROSE = re.compile(rf"\b{_NAME}\s+(?:wrote|presented|authored|led|designed|built)\b")
 _MENTION = re.compile(rf"\b(?:thanked|names|features|interviewed|introduced)\s+{_NAME}\b")
 _STRONG = frozenset({"author", "speaker", "contributor"})
 
