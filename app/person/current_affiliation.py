@@ -63,7 +63,9 @@ def resolve_affiliation(
     activity = [
         item
         for item in named
-        if _recent(item, observed_on) and _technical(item, functions) and not _interviewee_only(item, name)
+        if _recent(item, observed_on)
+        and not _interviewee_only(item, name)
+        and (_technical(item, functions) or _author_metadata(item))
     ]
     company_activity = [item for item in activity if item in company]
     roles = [item for item in named if _states_role(item, title)]
@@ -308,6 +310,14 @@ def _recent(item: Evidence, observed_on: date) -> bool:
 
 def _dated(item: Evidence, observed_on: date) -> bool:
     return item.published_at is not None and not _recent(item, observed_on)
+
+
+def _author_metadata(item: Evidence) -> bool:
+    return item.evidence_type in {"author_metadata", "json_ld"} and item.field in {
+        "author",
+        "article:author",
+        "og:article:author",
+    }
 
 
 def _interviewee_only(item: Evidence, name: str) -> bool:

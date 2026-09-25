@@ -5,7 +5,7 @@ A metadata field is evidence for the claim it states. It is not ownership.
 
 import json
 import re
-from datetime import datetime
+from datetime import date, datetime
 
 from app.domain.models import Evidence, StructuredFact
 from app.person.entity import classify_entity
@@ -132,7 +132,13 @@ def mark_contradictions(facts: list[StructuredFact]) -> list[StructuredFact]:
     return lowered
 
 
-def evidence_from_facts(facts: list[StructuredFact], *, observed_at: datetime, observation_id: str) -> list[Evidence]:
+def evidence_from_facts(
+    facts: list[StructuredFact],
+    *,
+    observed_at: datetime,
+    observation_id: str,
+    published_at: date | None = None,
+) -> list[Evidence]:
     rows: list[Evidence] = []
     for fact in facts:
         if not fact.sentence:
@@ -145,7 +151,7 @@ def evidence_from_facts(facts: list[StructuredFact], *, observed_at: datetime, o
                 source_url=fact.source_url,
                 source_title=fact.field,
                 source_type="structured_metadata",
-                published_at=None,
+                published_at=published_at,
                 observed_at=observed_at,
                 confidence=fact.confidence,
                 lineage=[f"field:{fact.field}"],

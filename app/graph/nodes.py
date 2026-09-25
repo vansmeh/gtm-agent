@@ -55,7 +55,7 @@ from app.person.current_affiliation import (
     evidence_graph,
     resolve_affiliation,
 )
-from app.person.discovery import discover_mentions
+from app.person.discovery import Mention, discover_mentions
 from app.person.enrichment import (
     CandidateView,
     cheap_reject,
@@ -179,7 +179,12 @@ def _ingest_page(
     found = extract_evidence(observation)
     from app.research.structured import evidence_from_facts
 
-    meta = evidence_from_facts(page.facts, observed_at=deps.observed_at, observation_id=observation.id)
+    meta = evidence_from_facts(
+        page.facts,
+        observed_at=deps.observed_at,
+        observation_id=observation.id,
+        published_at=page.published_at,
+    )
     run.structured_facts.extend(page.facts)
     run.evidence.extend(found)
     run.evidence.extend(meta)
@@ -497,6 +502,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     if is_allowed_public_url(hit.url):
                         _ingest_page(run, deps, hit.url, hit.published_at, person_slot="verification")
         mentions = discover_mentions(run.observations, run.account_name)
+        mentions.extend(_mentions_from_metadata(run.evidence, mentions))
         priority_by_name = {item.name: item.priority_reason for item in prioritized}
         researched = set(deep_names[: run.deep_researched_count])
         people: list[PersonRecord] = []
@@ -760,6 +766,28 @@ def _discovery_lineage(query: str, hits: Sequence[object], url: str) -> list[str
     if provider:
         lineage.append(f"provider:{provider}")
     return lineage
+
+
+def _mentions_from_metadata(evidence: list[Evidence], existing: Sequence[object]) -> list[Mention]:
+    from app.person.entity import classify_entity
+
+    known = {getattr(item, "name", "") for item in existing}
+    found: list[Mention] = []
+    for item in evidence:
+        if item.evidence_type not in {"author_metadata", "json_ld", "speaker_metadata"}:
+            continue
+        name = item.value.strip()
+        if not name or name in known or classify_entity(name, item.excerpt) in {"ORG", "PRODUCT", "TITLE", "DOCUMENT"}:
+            continue
+        title = ""
+        marker = " at "
+        if "," in item.excerpt and marker in item.excerpt:
+            title = item.excerpt.split(",", 1)[1].split(marker, 1)[0].strip(" .")
+        found.append(
+            Mention(name=name, title=title, url=item.source_url, excerpt=item.excerpt, published_at=item.published_at)
+        )
+        known.add(name)
+    return found
 
 
 def _candidate_source(name: str, evidence: list[Evidence]) -> str:

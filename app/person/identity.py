@@ -56,12 +56,15 @@ class Identity:
 def identities_from_mentions(mentions: list[Mention], company: str, *, observed_on: date) -> list[Identity]:
     grouped: dict[str, list[Mention]] = defaultdict(list)
     for mention in mentions:
-        if not mention.name or not mention.title or not mention.url or not mention.excerpt:
+        attributed = mention.excerpt.startswith(("Author:", "Speaker:"))
+        if not mention.name or not mention.url or not mention.excerpt:
+            continue
+        if not mention.title and not attributed:
             continue
         grouped[mention.name].append(mention)
     built: list[Identity] = []
     for name, rows in grouped.items():
-        titles = list(dict.fromkeys(row.title for row in rows))
+        titles = list(dict.fromkeys(row.title for row in rows if row.title)) or [""]
         urls = list(dict.fromkeys(row.url for row in rows))
         dates = [row.published_at for row in rows if row.published_at is not None]
         contradictions: list[str] = []
