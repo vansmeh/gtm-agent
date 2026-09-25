@@ -128,6 +128,17 @@ def test_mentioned_person_without_employment_is_rejected() -> None:
     assert found is None
 
 
+def test_byline_label_is_not_a_person_name() -> None:
+    found = qualify_person(
+        "Author Who Made",
+        "Author Who Made the Stripe API faster.",
+        "Stripe",
+        source_url="https://stripe.com/blog/engineering/api",
+        domain="stripe.com",
+    )
+    assert found is None
+
+
 def test_document_title_is_not_a_person() -> None:
     found = qualify_person(
         "An Elegant Puzzle",

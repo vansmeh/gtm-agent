@@ -91,6 +91,8 @@ def explain_qualification(
 
     if not name or not context:
         return None, "empty name or context"
+    if name.split()[0].lower() in {"author", "authors", "by", "speaker", "written"}:
+        return None, "not a person (byline label)"
     ruled = _ruler_label(name)
     if ruled is not None and ruled != "PERSON":
         return None, f"not a person ({ruled})"
