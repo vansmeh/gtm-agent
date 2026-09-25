@@ -784,6 +784,9 @@ def _run_role_bridge(run: RunModel, deps: PipelineDeps, candidates: Sequence[obj
         queries = role_queries(name, run.account_name)[: run.role_bridge_budget]
         before = len(run.evidence)
         for query in queries:
+            import time
+
+            time.sleep(0.35)
             hits = _bridge_search(deps, query, limit=3)
             typed = [hit for hit in hits if isinstance(hit, SearchHit)]
             run.role_queries += 1
@@ -839,7 +842,10 @@ def _bridge_search(deps: PipelineDeps, query: str, *, limit: int) -> list[object
     budget = getattr(provider, "budget", None)
     if isinstance(calls, int) and isinstance(budget, int) and calls >= budget:
         provider.budget = calls + 1  # type: ignore[attr-defined]
-    hits: list[object] = list(provider.search(query, limit=limit))
+    try:
+        hits: list[object] = list(provider.search(query, limit=limit))
+    except Exception:
+        hits = []
     if isinstance(calls, int):
         provider.calls = calls  # type: ignore[attr-defined]
     if isinstance(budget, int):
