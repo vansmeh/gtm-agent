@@ -46,6 +46,17 @@ def test_actual_person_is_kept_with_context() -> None:
     assert any(item.relation == "has_role" for item in found.relations)
 
 
+def test_extra_token_around_a_person_span_is_rejected() -> None:
+    assert (
+        qualify_person(
+            "Outside Matt Hern",
+            "Outside Matt Hern spoke about Shopify search.",
+            "Shopify",
+        )
+        is None
+    )
+
+
 def test_person_without_company_context_is_rejected() -> None:
     assert qualify_person("Jane Smith", "Jane Smith spoke at the conference.", "Shopify") is None
 

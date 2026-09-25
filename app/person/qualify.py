@@ -25,7 +25,7 @@ _RULES: dict[str, tuple[str, ...]] = {
     "DOCUMENT": ("An Elegant Puzzle", "Magic Quadrant"),
     "JOB_TITLE": ("Full Stack", "Engineering"),
     "TEAM": ("Platform Engineering", "Search Team"),
-    "COMPANY": ("Datadog", "Shopify", "Stripe", "Acme AI", "Northwind"),
+    "COMPANY": ("Datadog", "Shopify", "Stripe", "Acme AI", "Northwind", "Product School"),
     "PRODUCT": ("Bits AI", "Magic Transit", "Application Monitoring", "Prioritization Engine"),
 }
 _AT = re.compile(r"\bat ([A-Z][A-Za-z0-9]+(?: [A-Z][A-Za-z0-9]+)?)")
@@ -153,7 +153,12 @@ def _ruler_label(name: str) -> str | None:
 
 def _gliner_label(name: str, context: str) -> tuple[str, float]:
     spans = _spans(context)
-    covering = [item for item in spans if name.lower() in item[1].lower() or item[1].lower() in name.lower()]
+    target = name.lower()
+    covering = [
+        item
+        for item in spans
+        if item[1].lower() == target or target in item[1].lower()
+    ]
     if not covering:
         return "UNKNOWN", 0.0
     label, _text, score = max(covering, key=lambda item: item[2])
