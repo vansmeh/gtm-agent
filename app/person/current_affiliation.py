@@ -104,7 +104,9 @@ def resolve_affiliation(
         if result.affiliation == "unknown":
             result.affiliation = "probable"
             result.affiliation_evidence_ids = [snippets[0].id]
-    elif result.affiliation in {"current", "probable"}:
+    elif result.affiliation in {"current", "probable"} and any(
+        item.evidence_type not in {"author_metadata", "json_ld"} for item in recent_company
+    ):
         result.role_state = "probable_current"
         result.role_evidence_ids = list(result.affiliation_evidence_ids)
     elif timeline.historical and not recent_company:
