@@ -14,6 +14,7 @@ from app.domain.models import (
     PersonSearchTrace,
     Recommendation,
     ResearchLogEntry,
+    RoleBridgeReport,
     RunModel,
     SearchExecution,
     SearchTrace,
@@ -605,6 +606,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     evidence_ids = converged_ids
             record.ownership_level = level  # type: ignore[assignment]
             record.ownership_evidence_ids = evidence_ids
+            _fill_role_report(run, record)
             workload = level in {"explicit", "strong"}
             record.candidate_class = candidate_class(identity.title, workload_connected=workload)  # type: ignore[assignment]
             record.currentness = currentness_for(  # type: ignore[assignment]
@@ -775,54 +777,77 @@ def _discovery_lineage(query: str, hits: Sequence[object], url: str) -> list[str
 
 
 def _run_role_bridge(run: RunModel, deps: PipelineDeps, candidates: Sequence[object]) -> None:
-    from app.person.current_role_bridge import resolve_role_bridge, role_queries
+    from app.person.current_role_bridge import resolve_role_bridge, source_queries, source_rank
+    from app.person.entity import classify_entity
     from app.research.search import SearchHit
-    from app.research.structured import snippet_role_facts
 
     for view in candidates:
         name = str(getattr(view, "name", ""))
-        queries = role_queries(name, run.account_name)[: run.role_bridge_budget]
-        before = len(run.evidence)
+        excerpt = str(getattr(view, "excerpt", ""))
+        if classify_entity(name, excerpt) in {"ORG", "PRODUCT", "TITLE", "DOCUMENT"}:
+            continue
+        queries = source_queries(name, run.account_name, run.domain)[: run.role_bridge_budget]
+        discovered: list[SearchHit] = []
+        seen_urls: set[str] = set()
+        fetched = 0
+        used = 0
+        found_page_role = False
         for query in queries:
+            if found_page_role:
+                break
             import time
 
             time.sleep(0.35)
             hits = _bridge_search(deps, query, limit=3)
             typed = [hit for hit in hits if isinstance(hit, SearchHit)]
+            used += 1
             run.role_queries += 1
             run.role_results += len(typed)
             _note_search(run, query, typed)
             for hit in typed:
-                for fact in snippet_role_facts(
-                    title=hit.title,
-                    snippet=hit.snippet,
-                    url=hit.url,
-                    account_name=run.account_name,
-                    observed_at=run.observed_at,
-                    provider=hit.provider,
-                    query=query,
-                ):
-                    if any(item.id == fact.id for item in run.evidence):
-                        continue
-                    if name not in fact.excerpt:
-                        continue
-                    run.evidence.append(fact)
-                    run.role_hits += 1
-                if "linkedin.com" in hit.url or not is_allowed_public_url(hit.url):
+                if hit.url in seen_urls or "linkedin.com" in hit.url:
+                    continue
+                seen_urls.add(hit.url)
+                discovered.append(hit)
+            discovered.sort(key=lambda hit: source_rank(hit.url, run.domain))
+            for hit in discovered:
+                if source_rank(hit.url, run.domain) >= 100 or not is_allowed_public_url(hit.url):
                     continue
                 if hit.url in run.fetched_urls:
                     continue
                 _ingest_page(run, deps, hit.url, hit.published_at, person_slot="role")
+                fetched += 1
+                resolved_now = resolve_role_bridge(
+                    name, run.evidence, account_name=run.account_name, observed_on=run.observed_at.date()
+                )
+                if resolved_now.role_state == "current" and resolved_now.confidence >= 0.7:
+                    found_page_role = True
+                    run.role_hits += 1
+                    break
+                if fetched >= 3:
+                    break
         resolved = resolve_role_bridge(
-            name,
-            run.evidence,
-            account_name=run.account_name,
-            observed_on=run.observed_at.date(),
+            name, run.evidence, account_name=run.account_name, observed_on=run.observed_at.date()
         )
-        if resolved.role_state in {"current", "probable_current"} or len(run.evidence) > before:
-            run.role_resolutions += 1 if resolved.role_state in {"current", "probable_current"} else 0
-        if resolved.role_state not in {"current", "probable_current"}:
+        if resolved.role_state in {"current", "probable_current"}:
+            run.role_resolutions += 1
+        else:
             run.role_failures += 1
+        run.role_bridge_reports.append(
+            RoleBridgeReport(
+                candidate=name,
+                role_queries=used,
+                sources_discovered=len(discovered),
+                sources_fetched=fetched,
+                role_title=resolved.title,
+                role_confidence=resolved.confidence,
+                currentness=resolved.role_state,
+                function=resolved.function,
+                function_confidence=resolved.function_level,
+                ownership="pending",
+                why=_role_why(resolved.role_state, resolved.title),
+            )
+        )
         run.person_traces.append(
             PersonSearchTrace(
                 query=queries[0] if queries else "",
@@ -830,9 +855,38 @@ def _run_role_bridge(run: RunModel, deps: PipelineDeps, candidates: Sequence[obj
                 source=resolved.source,
                 finding=f"{resolved.role_state}: {resolved.title or 'unknown'}",
                 decision="accept" if resolved.role_state in {"current", "probable_current"} else "reject",
-                reason="candidate role bridge; LinkedIn pages are not fetched",
+                reason="public page verifies the role; LinkedIn pages are not fetched",
             )
         )
+
+
+def _role_why(state: str, title: str) -> str:
+    if state == "current" and title:
+        return "a fetched public page states the role"
+    if state == "probable_current":
+        return "only a search snippet states the role"
+    return "no public page stated a current role"
+
+
+def _ownership_why(record: PersonRecord) -> str:
+    if record.ownership_level in {"explicit", "strong"}:
+        return "current role, function, artifact, and workload evidence agree"
+    if record.technical_activity == "strong":
+        return "technical artifact exists, but workload ownership not established"
+    return "role or function evidence is incomplete"
+
+
+def _fill_role_report(run: RunModel, record: PersonRecord) -> None:
+    for report in run.role_bridge_reports:
+        if report.candidate != record.name:
+            continue
+        report.ownership = record.ownership_level
+        report.function = record.function_guess or report.function or "unknown"
+        report.function_confidence = record.function_level
+        report.role_title = record.title or report.role_title
+        report.currentness = record.role_state
+        report.role_confidence = record.role_confidence or report.role_confidence
+        report.why = _ownership_why(record)
 
 
 def _bridge_search(deps: PipelineDeps, query: str, *, limit: int) -> list[object]:

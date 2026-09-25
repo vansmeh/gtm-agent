@@ -76,6 +76,20 @@ class RoleHistoryEntry(BaseModel):
     confidence: float = 0.0
 
 
+class RoleBridgeReport(BaseModel):
+    candidate: str
+    role_queries: int = 0
+    sources_discovered: int = 0
+    sources_fetched: int = 0
+    role_title: str = ""
+    role_confidence: float = 0.0
+    currentness: str = "unknown"
+    function: str = ""
+    function_confidence: str = "unknown"
+    ownership: str = "unknown"
+    why: str = ""
+
+
 class TechnicalSignal(BaseModel):
     id: str
     signal_type: str
@@ -445,6 +459,7 @@ class RunModel(BaseModel):
     role_hits: int = 0
     role_resolutions: int = 0
     role_failures: int = 0
+    role_bridge_reports: list[RoleBridgeReport] = Field(default_factory=list)
     discovery_queries_used: int = 0
     discovery_pages_used: int = 0
     verification_queries_used: int = 0

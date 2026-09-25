@@ -47,6 +47,30 @@ def _fit_line(person: object) -> str:
     )
 
 
+def _role_bridge_lines(run: RunModel) -> list[str]:
+    lines = ["ROLE BRIDGE:"]
+    if not run.role_bridge_reports:
+        lines.append("none")
+        return lines
+    for report in run.role_bridge_reports:
+        lines.extend(
+            [
+                f"CANDIDATE: {report.candidate}",
+                f"ROLE QUERIES: {report.role_queries}",
+                f"PUBLIC SOURCES: {report.sources_discovered}",
+                f"FETCHED: {report.sources_fetched}",
+                f"ROLE: {report.role_title or 'unknown'}",
+                f"ROLE CONFIDENCE: {report.role_confidence}",
+                f"CURRENTNESS: {report.currentness}",
+                f"FUNCTION: {report.function or 'unknown'}",
+                f"FUNCTION CONFIDENCE: {report.function_confidence}",
+                f"OWNERSHIP: {report.ownership}",
+                f"WHY: {report.why}",
+            ]
+        )
+    return lines
+
+
 def render_live_report(run: RunModel) -> str:
     rec = run.recommendation
     signal = run.signals[0].label if run.signals else "unknown"
@@ -62,6 +86,15 @@ def render_live_report(run: RunModel) -> str:
         f"role_hits: {run.role_hits}",
         f"role_resolutions: {run.role_resolutions}",
         f"role_failures: {run.role_failures}",
+        f"candidates: {run.candidates_retained}",
+        f"role sources found: {run.role_results}",
+        f"role resolutions: {run.role_resolutions}",
+        "current roles: "
+        + str(sum(person.role_state in {"current", "probable_current"} for person in run.people)),
+        "current functions: "
+        + str(sum(person.function_level in {"explicit", "strong"} for person in run.people)),
+        "strong owners: "
+        + str(sum(person.ownership_level in {"explicit", "strong"} for person in run.people)),
         "TIER_A: "
         + str(sum(row.opportunity_tier == "TIER_A_VERIFIED_OWNER" for row in run.person_opportunities)),
         "TIER_B: "
@@ -71,6 +104,7 @@ def render_live_report(run: RunModel) -> str:
         "TIER_D: "
         + str(sum(row.opportunity_tier == "TIER_D_INSUFFICIENT" for row in run.person_opportunities)),
         f"ACCOUNT: {run.account_name}",
+        *_role_bridge_lines(run),
         "TECHNICAL SIGNAL: " + signal,
         "TECHNICAL SIGNALS: " + (", ".join(item.label for item in run.signals) or signal),
         "AFFECTED FUNCTIONS: " + (", ".join(run.affected_functions) or "unknown"),

@@ -46,20 +46,51 @@ class RoleResolution:
     evidence_ids: list[str] = field(default_factory=list)
 
 
-def role_queries(name: str, company: str) -> list[str]:
-    """Ten targeted queries. LinkedIn results stay snippets and are not fetched."""
+def source_queries(name: str, company: str, domain: str) -> list[str]:
+    """Find a public page. The snippet does not have to contain the title."""
+    host = domain or company
     return [
-        f'"{name}" "{company}"',
-        f'"{name}" "{company}" role',
-        f'"{name}" "{company}" title',
-        f'"{name}" "{company}" 2026',
-        f'"{name}" "{company}" current',
-        f'"{name}" "{company}" joined',
-        f'"{name}" "{company}" promoted',
+        f'"{name}" "{company}" official',
         f'"{name}" "{company}" engineering',
-        f'site:linkedin.com/in "{name}" "{company}"',
-        f'site:github.com "{name}" "{company}"',
+        f'site:{host} "{name}"',
+        f'site:{host} "{name}" engineer',
+        f'site:{host} "{name}" platform',
+        f'site:{host} "{name}" infrastructure',
+        f'site:{host} "{name}" architecture',
+        f'"{name}" "{company}" speaker',
+        f'"{name}" "{company}" conference',
+        f'"{name}" "{company}" GitHub',
     ]
+
+
+def role_queries(name: str, company: str, domain: str = "") -> list[str]:
+    return source_queries(name, company, domain or company)
+
+
+def source_rank(url: str, domain: str) -> int:
+    """Lower is a better verification source. LinkedIn is never fetched."""
+    lowered = url.lower()
+    if "linkedin.com" in lowered:
+        return 100
+    path = lowered.split("?", 1)[0]
+    on_domain = bool(domain) and domain.lower() in lowered
+    if on_domain and any(part in path for part in ("/team", "/about", "/leadership", "/people", "/bio")):
+        return 1
+    if on_domain and "author" in path:
+        return 2
+    if on_domain and any(part in path for part in ("/blog", "/engineering")):
+        return 3
+    if on_domain and "/news" in path:
+        return 4
+    if any(part in path for part in ("/speaker", "/speakers", "/conference", "/talk")):
+        return 5
+    if "interview" in path:
+        return 6
+    if "github.com" in lowered:
+        return 7
+    if on_domain:
+        return 8
+    return 9
 
 
 def employer_queries(name: str, company: str) -> list[str]:
@@ -147,6 +178,29 @@ def resolve_role_bridge(
     result.evidence_ids = [chosen["evidence_id"]]
     result.role_state = _state(chosen, target, observed_on)
     result.function, result.function_level, result.function_source = function_from_role(chosen["title"])
+    page_titles = {
+        span["title"].lower()
+        for span in target
+        if span["kind"] != "search_snippet"
+        and span["title"] != "changed employer"
+        and _band(span["date"] if isinstance(span["date"], date) else None, observed_on) != "historical"
+    }
+    if len(page_titles) > 1:
+        result.role_state = "unknown"
+        result.confidence = min(result.confidence, 0.3)
+        return result
+    pages = [
+        span
+        for span in target
+        if span["kind"] != "search_snippet" and span["title"].lower() == chosen["title"].lower()
+    ]
+    hosts = {span["source"].split("/")[2].lower() for span in pages if span["source"].count("/") >= 2}
+    if len(hosts) >= 2 and result.role_state != "historical":
+        result.confidence = max(result.confidence, 0.85)
+        result.role_state = "current"
+    if chosen["kind"] == "search_snippet" and len(pages) == 0:
+        result.role_state = "probable_current" if result.role_state != "historical" else "historical"
+        result.confidence = min(result.confidence, 0.45)
     return result
 
 
@@ -273,7 +327,9 @@ def _state(chosen: _Span, target: list[_Span], observed_on: date) -> str:
         return "historical"
     if band == "aging":
         return "probable_current" if len(target) >= 2 else "historical"
-    if kind in {"company_page", "author_bio", "engineering_artifact"}:
+    if kind == "search_snippet":
+        return "probable_current"
+    if kind in {"company_page", "author_bio", "engineering_artifact", "speaker_bio", "interview", "github"}:
         return "current"
     return "probable_current"
 
