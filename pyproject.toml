@@ -1,0 +1,50 @@
+[project]
+name = "redis-gtm-agent"
+version = "0.1.0"
+description = "Person-centric technical GTM intelligence for a Redis SDR."
+requires-python = ">=3.12"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["app"]
+warn_unused_ignores = true
+plugins = []
+
+[[tool.mypy.overrides]]
+module = ["app.sheets.google_load"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = [
+  "trafilatura",
+  "trafilatura.*",
+  "bs4",
+  "langgraph",
+  "langgraph.*",
+  "googleapiclient",
+  "googleapiclient.*",
+  "google.oauth2",
+  "google.oauth2.*",
+  "google.auth",
+  "google.auth.*",
+  "gliner",
+  "gliner.*",
+  "spacy",
+  "spacy.*",
+]
+ignore_missing_imports = true

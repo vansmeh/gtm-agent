@@ -1,0 +1,55 @@
+{
+  "version": "1",
+  "personas": [
+    {
+      "id": "platform_engineering_leader",
+      "title_keywords": ["head of platform", "platform engineering"]
+    },
+    {
+      "id": "ml_infrastructure_leader",
+      "title_keywords": ["ml infrastructure", "machine learning infrastructure"]
+    },
+    {
+      "id": "engineering_executive",
+      "title_keywords": ["vp engineering", "vice president of engineering", "cto"]
+    }
+  ],
+  "cadences": [
+    {
+      "id": "technical_review_first",
+      "auto_send": false
+    }
+  ],
+  "templates": [
+    {
+      "id": "platform_rag_latency_v1",
+      "channel": "email",
+      "persona_ids": ["platform_engineering_leader"],
+      "signal_types": ["ai_search_launch", "rag_architecture", "low_latency_serving", "platform_hiring"],
+      "timing": ["product_launch", "hiring", "new_technical_project", "ai_initiative"],
+      "approved": true,
+      "subject": "{{account_name}} search serving path",
+      "body": "{{person_name}} — {{role}}\n\nI read public material tying {{account_name}} to {{signal_summary}}.\n\nWhy now: {{why_now}}\n\nWorking hypothesis, not a claim that Redis is required: {{hypothesis}}\n\nAlternatives already in view: {{alternatives}}\n\nWhat is not established: {{unknowns}}\n\nIf this is the wrong problem or the wrong person, that is useful to know."
+    },
+    {
+      "id": "ml_infra_context_v1",
+      "channel": "email",
+      "persona_ids": ["ml_infrastructure_leader"],
+      "signal_types": ["ml_infrastructure_hiring"],
+      "timing": ["hiring"],
+      "approved": true,
+      "subject": "{{account_name}} ML infrastructure",
+      "body": "{{person_name}} — {{role}}\n\nPublic hiring material mentions {{signal_summary}}.\n\nThis note does not assume a Redis requirement.\n\nUnknown: {{unknowns}}"
+    },
+    {
+      "id": "executive_context_v1",
+      "channel": "email",
+      "persona_ids": ["engineering_executive"],
+      "signal_types": ["ai_search_launch"],
+      "timing": ["leadership_change"],
+      "approved": true,
+      "subject": "{{account_name}} engineering context",
+      "body": "{{person_name}} — {{role}}\n\n{{signal_summary}}\n\nNo technical ownership is assumed from the executive title.\n\nUnknown: {{unknowns}}"
+    }
+  ]
+}

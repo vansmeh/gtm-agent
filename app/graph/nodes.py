@@ -1,0 +1,1704 @@
+"""Pipeline nodes. Each one reads evidence already on the run and writes structured results."""
+
+import re
+import uuid
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+
+from app.domain.models import (
+    Evidence,
+    EvidenceEdge,
+    OwnershipLink,
+    PersonRecord,
+    PersonSearchTrace,
+    Recommendation,
+    ResearchLogEntry,
+    RoleBridgeReport,
+    RunModel,
+    SearchExecution,
+    SearchTrace,
+    SnippetLead,
+    TechnicalArtifact,
+    TemplateChoice,
+)
+from app.graph.state import GraphState, dump_run, load_run
+from app.laya.adapter import LayaAdapter
+from app.opportunity.person_opportunity import (
+    apply_redis,
+    apply_why_now,
+    assign_threads,
+    build_opportunities,
+    c_suite_without_specialist_role,
+    decide_channel,
+    decide_contact,
+    exploratory_message,
+    hypotheses_for,
+    hypothesis_queries,
+    research_gap,
+)
+from app.opportunity.redis_mapper import map_opportunities
+from app.opportunity.why_now import detect_why_now
+from app.person.artifact_discovery import (
+    artifact_queries,
+    artifacts_from_evidence,
+    candidate_class,
+    converge_ownership,
+    currentness_for,
+    team_follow_up_queries,
+    teams_in_text,
+)
+from app.person.attribution import build_artifacts
+from app.person.candidate_generation import extract_names, recall_queries
+from app.person.current_affiliation import (
+    AffiliationResolution,
+    current_role_search_queries,
+    evidence_graph,
+    resolve_affiliation,
+)
+from app.person.discovery import Mention, discover_mentions
+from app.person.enrichment import (
+    CandidateView,
+    cheap_reject,
+    deep_research_queries,
+    next_owner_query,
+    prioritize,
+    profile_queries,
+)
+from app.person.freshness import ACCOUNT_TRIGGER_DAYS, resolve_freshness
+from app.person.identity import identities_from_mentions, validity_for
+from app.person.ownership import affected_functions, classify_ownership, job_function_evidence
+from app.person.person_account_fit import assess_fit
+from app.person.persona_mapping import map_persona
+from app.person.public_activity import collect_activity
+from app.person.ranking import build_dossier, explain_pair, rank_people, selection_status_for
+from app.person.responsibility import classify_responsibility, extract_responsibilities
+from app.person.role import function_guess_from_title, seniority_from_title
+from app.person.snippets import candidates_from_hits
+from app.person.technical_footprint import build_footprint
+from app.person.timeline import indexed_profile_queries
+from app.playbook.selection import (
+    Playbook,
+    choose_template,
+    compatible_templates,
+    render_template,
+)
+from app.research.bounds import evidence_is_sufficient, person_discovery_queries, queries_for, source_rank
+from app.research.extract import extract_evidence, observation_from_page
+from app.research.fetch import PageFetcher
+from app.research.search import SearchProvider, is_allowed_public_url
+from app.sheets.provider import SheetsProvider
+from app.signals.detection import detect_signals, strongest_problem
+from app.signals.functions import detect_functions
+
+
+@dataclass
+class PipelineDeps:
+    search: SearchProvider
+    fetcher: PageFetcher
+    sheets: SheetsProvider
+    kernel: LayaAdapter
+    playbook: Playbook
+    observed_at: datetime
+    max_searches_per_cycle: int = 4
+    person_query_budget: int = 6
+    discovery_query_budget: int = 10
+    discovery_page_budget: int = 4
+    verification_query_budget: int = 6
+    verification_page_budget: int = 3
+    deep_query_budget: int = 10
+    deep_page_budget: int = 6
+    role_bridge_budget: int = 10
+    search_provider_name: str = "mock"
+
+
+def _log(run: RunModel, node: str, message: str) -> None:
+    run.logs.append(ResearchLogEntry(node=node, message=message, cycle=run.cycle))
+
+
+def intake(state: GraphState) -> GraphState:
+    run = load_run(state)
+    _log(run, "intake", f"Account intake for {run.account_name}.")
+    return dump_run(run)
+
+
+def plan_search(state: GraphState) -> GraphState:
+    run = load_run(state)
+    run.cycle += 1
+    if run.cycle > run.max_cycles:
+        run.stop_research = True
+        _log(run, "plan_search", "Research cap reached.")
+    else:
+        _log(run, "plan_search", f"Starting research cycle {run.cycle}.")
+    return dump_run(run)
+
+
+def _ingest_page(
+    run: RunModel,
+    deps: PipelineDeps,
+    url: str,
+    published_hint: str | None = None,
+    *,
+    person_slot: str | bool = False,
+) -> None:
+    from datetime import date
+
+    if url in run.fetched_urls:
+        return
+    if person_slot == "discovery" and run.discovery_pages_used >= run.discovery_page_budget:
+        return
+    if person_slot == "verification" and run.verification_pages_used >= run.verification_page_budget:
+        return
+    if person_slot == "deep" and run.deep_pages_used >= run.deep_page_budget:
+        return
+    if person_slot == "role" and run.role_queries >= run.role_bridge_budget * 5:
+        return
+    if person_slot is False and len(run.fetched_urls) >= run.max_pages:
+        return
+    page = deps.fetcher.fetch(url)
+    run.fetched_urls.append(url)
+    if person_slot == "discovery":
+        run.discovery_pages_used += 1
+    elif person_slot == "verification":
+        run.verification_pages_used += 1
+    elif person_slot == "deep":
+        run.deep_pages_used += 1
+        run.person_pages_used += 1
+    if page.status != "ok":
+        _log(run, "fetch", f"Skipped {url}: {page.status} {page.error}")
+        return
+    if page.published_at is None and published_hint:
+        try:
+            page = page.model_copy(update={"published_at": date.fromisoformat(published_hint[:10])})
+        except ValueError:
+            page = page
+    observation = observation_from_page(page, observed_at=deps.observed_at, cycle=run.cycle)
+    if any(existing.text_sha256 == observation.text_sha256 for existing in run.observations):
+        _log(run, "extract", f"Skipped duplicate content at {url}.")
+        return
+    run.observations.append(observation)
+    if observation.poisoned:
+        _log(run, "extract", f"Quarantined untrusted instructions at {url}.")
+        return
+    found = extract_evidence(observation)
+    from app.research.structured import evidence_from_facts
+
+    meta = evidence_from_facts(
+        page.facts,
+        observed_at=deps.observed_at,
+        observation_id=observation.id,
+        published_at=page.published_at,
+    )
+    run.structured_facts.extend(page.facts)
+    run.evidence.extend(found)
+    run.evidence.extend(meta)
+    found = found + meta
+    _log(run, "extract", f"Extracted {len(found)} evidence items from {url}.")
+
+
+def _search_and_fetch(run: RunModel, deps: PipelineDeps) -> None:
+    if run.stop_research:
+        return
+    queries = queries_for(run.account_name, run.cycle)[: deps.max_searches_per_cycle]
+    for query in queries:
+        if len(run.fetched_urls) >= run.max_pages:
+            _log(run, "search", "Account page budget reached.")
+            break
+        hits = deps.search.search(query, limit=4)
+        _note_search(run, query, hits)
+        _record_snippet_leads(run, hits, query)
+        _log(run, "search", f"Query {query!r} returned {len(hits)} hits.")
+        for hit in hits:
+            _ingest_page(run, deps, hit.url, hit.published_at)
+
+
+def search_and_extract(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
+    def node(state: GraphState) -> GraphState:
+        run = load_run(state)
+        _search_and_fetch(run, deps)
+        return dump_run(run)
+
+    return node
+
+
+def assess(state: GraphState) -> GraphState:
+    run = load_run(state)
+    topics: set[str] = set()
+    for item in run.evidence:
+        topics.update(item.topics)
+    urls = {item.source_url for item in run.evidence}
+    if run.cycle >= run.max_cycles or evidence_is_sufficient(topics, urls):
+        run.stop_research = True
+        _log(run, "assess", f"Stopping research after cycle {run.cycle}.")
+    else:
+        _log(run, "assess", "Evidence is thin. Another cycle is allowed.")
+    return dump_run(run)
+
+
+def route_after_assess(state: GraphState) -> str:
+    run = load_run(state)
+    if run.stop_research or run.cycle >= run.max_cycles:
+        return "detect_signals"
+    return "plan_search"
+
+
+def detect_signal_node(state: GraphState) -> GraphState:
+    run = load_run(state)
+    run.signals = detect_signals(run.evidence)
+    _log(run, "signals", f"Detected {len(run.signals)} technical signals.")
+    return dump_run(run)
+
+
+def detect_function_node(state: GraphState) -> GraphState:
+    run = load_run(state)
+    run.functions = detect_functions(run.evidence)
+    _log(run, "functions", f"Detected {len(run.functions)} owning functions.")
+    return dump_run(run)
+
+
+def generate_person_hypotheses(state: GraphState) -> GraphState:
+    run = load_run(state)
+    run.person_hypotheses = hypotheses_for(run.signals)
+    labels = [item.signal_label for item in run.person_hypotheses] or ["none"]
+    _log(run, "hypotheses", f"Person hypothesis tree for {', '.join(labels)}.")
+    return dump_run(run)
+
+
+def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
+    def node(state: GraphState) -> GraphState:
+        run = load_run(state)
+        function_label = run.functions[0].label if run.functions else ""
+        signal_label = " ".join(item.label for item in run.signals[:2]) or "technical"
+        run.affected_functions = affected_functions(signal_label) if run.signals else []
+        run.discovery_query_budget = deps.discovery_query_budget
+        run.discovery_page_budget = deps.discovery_page_budget
+        run.verification_query_budget = deps.verification_query_budget
+        run.verification_page_budget = deps.verification_page_budget
+        run.deep_query_budget = deps.deep_query_budget
+        run.role_bridge_budget = deps.role_bridge_budget
+        run.deep_page_budget = deps.deep_page_budget
+        queries = (
+            person_discovery_queries(run.account_name, run.domain, function_label, signal_label)
+            + hypothesis_queries(run.account_name, run.person_hypotheses)
+        )[: deps.discovery_query_budget]
+        if run.affected_functions:
+            queries = recall_queries(run.account_name, run.domain, run.affected_functions) + queries
+        elif run.evidence:
+            queries = recall_queries(run.account_name, run.domain, ["engineering"]) + queries
+        elif run.signals:
+            queries = artifact_queries(run.account_name, run.domain, signal_label)[:6] + queries
+        collected: list[tuple[int, str, str | None]] = []
+        seen_hits: set[str] = set()
+        for query in queries:
+            if run.discovery_queries_used >= run.discovery_query_budget and not run.signals:
+                break
+            hits = deps.search.search(query, limit=4)
+            run.discovery_queries_used += 1
+            _note_search(run, query, hits)
+            _record_snippet_leads(run, hits, query)
+            _log(run, "people", f"Person discovery query {query!r} returned {len(hits)} hits.")
+            run.person_traces.append(
+                PersonSearchTrace(
+                    query=query,
+                    finding=f"{len(hits)} public hits",
+                    decision="accept" if hits else "reject",
+                    reason="hits returned" if hits else "no public hits",
+                )
+            )
+            for hit in hits:
+                if hit.url in seen_hits or not is_allowed_public_url(hit.url):
+                    continue
+                seen_hits.add(hit.url)
+                collected.append((source_rank(hit.url, run.domain), hit.url, hit.published_at))
+        collected.sort(key=lambda item: item[0])
+        for _rank, url, published in collected:
+            if run.discovery_pages_used >= run.discovery_page_budget:
+                break
+            _ingest_page(run, deps, url, published, person_slot="discovery")
+        observed_on = run.observed_at.date()
+        mentions = discover_mentions(run.observations, run.account_name)
+        topic = signal_label or "architecture"
+        if run.signals:
+            team_names = list(
+                dict.fromkeys(
+                    team
+                    for obs in run.observations
+                    if not obs.poisoned
+                    for team in teams_in_text(obs.sanitized_text)
+                )
+            )[:1]
+            fetched_team = 0
+            for team in team_names:
+                for query in team_follow_up_queries(run.account_name, team)[:2]:
+                    hits = deps.search.search(query, limit=4)
+                    _note_search(run, query, hits)
+                    _record_snippet_leads(run, hits, query)
+                    for hit in hits:
+                        if fetched_team >= 1 or not is_allowed_public_url(hit.url) or hit.url in run.fetched_urls:
+                            continue
+                        _ingest_page(run, deps, hit.url, hit.published_at, person_slot="discovery")
+                        fetched_team += 1
+            mentions = discover_mentions(run.observations, run.account_name)
+        if not run.affected_functions:
+            run.signals = detect_signals(run.evidence) or run.signals
+            label = " ".join(item.label for item in run.signals[:2])
+            run.affected_functions = affected_functions(label) if run.signals else []
+            fetched_functions = 0
+            owner_queries = (
+                artifact_queries(run.account_name, run.domain, label)[:4]
+                if run.affected_functions and run.signals
+                else []
+            )
+            for query in owner_queries:
+                hits = deps.search.search(query, limit=4)
+                _note_search(run, query, hits)
+                _record_snippet_leads(run, hits, query)
+                for hit in hits:
+                    if fetched_functions >= 2 or not is_allowed_public_url(hit.url):
+                        continue
+                    if hit.url in run.fetched_urls:
+                        continue
+                    _ingest_page(run, deps, hit.url, hit.published_at, person_slot="discovery")
+                    fetched_functions += 1
+            mentions = discover_mentions(run.observations, run.account_name)
+        if run.affected_functions and run.discovery_queries_used < 10 * len(run.affected_functions):
+            for query in recall_queries(run.account_name, run.domain, run.affected_functions):
+                if run.discovery_queries_used >= 10 * len(run.affected_functions):
+                    break
+                hits = deps.search.search(query, limit=4)
+                run.discovery_queries_used += 1
+                _note_search(run, query, hits)
+                _record_snippet_leads(run, hits, query)
+            mentions = discover_mentions(run.observations, run.account_name)
+        if run.affected_functions:
+            for query in indexed_profile_queries(run.account_name, run.affected_functions)[:4]:
+                hits = deps.search.search(query, limit=4)
+                _note_search(run, query, hits)
+                _record_snippet_leads(run, hits, query)
+        cap = 50
+        views = [
+            CandidateView(
+                name=mention.name,
+                title=mention.title,
+                company=run.account_name,
+                url=mention.url,
+                excerpt=mention.excerpt,
+                published_at=mention.published_at,
+            )
+            for mention in mentions[:cap]
+        ]
+        known_names = {item.name for item in views}
+        for lead in run.snippet_leads:
+            if lead.name in known_names or len(views) >= cap:
+                continue
+            known_names.add(lead.name)
+            views.append(
+                CandidateView(
+                    name=lead.name,
+                    title=lead.title,
+                    company=run.account_name,
+                    url=lead.url,
+                    excerpt=lead.excerpt,
+                    published_at=None,
+                )
+            )
+        from app.person.qualify import qualify_person
+
+        kept: list[CandidateView] = []
+        for view in views:
+            qualified = qualify_person(
+                view.name,
+                view.excerpt,
+                run.account_name,
+                source_url=view.url,
+                source_type="untrusted_web",
+            )
+            if qualified is None:
+                view.reject_reason = "entity is not a person in company context"
+                run.person_traces.append(
+                    PersonSearchTrace(
+                        query="",
+                        candidate=view.name,
+                        source=view.url,
+                        finding=view.title,
+                        decision="reject",
+                        reason=view.reject_reason,
+                    )
+                )
+                continue
+            view.entity_type = qualified.entity_type
+            view.entity_confidence = qualified.entity_confidence
+            _record_entity_relations(run, qualified)
+            reason = cheap_reject(
+                view,
+                account_name=run.account_name,
+                functions=run.affected_functions,
+                observed_on=observed_on,
+            )
+            if c_suite_without_specialist_role(view.title):
+                reason = "C-suite title without a specialist role or ownership evidence"
+            if reason:
+                view.reject_reason = reason
+                run.person_traces.append(
+                    PersonSearchTrace(
+                        query="",
+                        candidate=view.name,
+                        source=view.url,
+                        finding=view.title,
+                        decision="reject",
+                        reason=reason,
+                    )
+                )
+                continue
+            kept.append(view)
+        prioritized = prioritize(
+            kept, functions=run.affected_functions, observed_on=observed_on
+        )
+        run.candidates_discovered = len(views)
+        run.candidates_rejected = len(views) - len(kept)
+        run.candidates_retained = len(kept)
+        run.candidates_prioritized = len(prioritized)
+        deep_names = [item.name for item in prioritized[:5]]
+        _verify_snippet_leads(run, deps, mentions, only=set(deep_names))
+        for view in prioritized[:5]:
+            if run.verification_queries_used >= run.verification_query_budget:
+                break
+            role_queries = current_role_search_queries(view.name, run.account_name, run.domain)
+            for query in role_queries[:3] + profile_queries(view.name, run.account_name, run.affected_functions)[:1]:
+                if run.verification_queries_used >= run.verification_query_budget:
+                    break
+                hits = deps.search.search(query, limit=3)
+                run.verification_queries_used += 1
+                _note_search(run, query, hits)
+                run.person_traces.append(
+                    PersonSearchTrace(
+                        query=query,
+                        candidate=view.name,
+                        source=view.url,
+                        finding=f"{len(hits)} current-profile hits",
+                        decision="accept" if hits else "reject",
+                        reason="public current-profile discovery; LinkedIn pages are not fetched",
+                    )
+                )
+                for hit in hits:
+                    if "linkedin.com" in hit.url or not is_allowed_public_url(hit.url):
+                        continue
+                    if run.verification_pages_used >= run.verification_page_budget:
+                        break
+                    _ingest_page(run, deps, hit.url, hit.published_at, person_slot="verification")
+        people_first = [view for view in prioritized if view.entity_type == "PERSON"]
+        _run_role_bridge(run, deps, people_first[:5])
+        for view in prioritized[:5]:
+            if run.deep_queries_used >= run.deep_query_budget:
+                run.person_traces.append(
+                    PersonSearchTrace(
+                        query="",
+                        candidate=view.name,
+                        source=view.url,
+                        finding=view.title,
+                        decision="reject",
+                        reason="deep-person budget exhausted after higher-priority candidates",
+                    )
+                )
+                continue
+            view.priority_reason = view.priority_reason
+            for query in deep_research_queries(view.name, run.account_name, topic):
+                if run.deep_queries_used >= run.deep_query_budget:
+                    break
+                follow = deps.search.search(query, limit=4)
+                run.deep_queries_used += 1
+                _note_search(run, query, follow)
+                run.person_traces.append(
+                    PersonSearchTrace(
+                        query=query,
+                        candidate=view.name,
+                        source=view.url,
+                        finding=f"{len(follow)} deep-research hits",
+                        decision="accept" if follow else "reject",
+                        reason=view.priority_reason or "deep research for a prioritized candidate",
+                    )
+                )
+                for hit in follow:
+                    if not is_allowed_public_url(hit.url) or run.deep_pages_used >= run.deep_page_budget:
+                        continue
+                    _ingest_page(run, deps, hit.url, hit.published_at, person_slot="deep")
+            run.deep_researched_count += 1
+        if deep_names:
+            lead_name = deep_names[0]
+            check_query = f"{lead_name} {run.account_name} former OR previously"
+            if run.verification_queries_used < run.verification_query_budget:
+                check = deps.search.search(check_query, limit=3)
+                run.verification_queries_used += 1
+                _note_search(run, check_query, check)
+                for hit in check[:1]:
+                    if is_allowed_public_url(hit.url):
+                        _ingest_page(run, deps, hit.url, hit.published_at, person_slot="verification")
+        mentions = discover_mentions(run.observations, run.account_name)
+        mentions.extend(_mentions_from_metadata(run.evidence, mentions, run.account_name))
+        priority_by_name = {item.name: item.priority_reason for item in prioritized}
+        researched = set(deep_names[: run.deep_researched_count])
+        people: list[PersonRecord] = []
+        for identity in identities_from_mentions(mentions, run.account_name, observed_on=observed_on):
+            _attach_ownership_window(run, identity.name)
+            status, responsibility_lines = classify_responsibility(
+                identity.name, identity.title, run.evidence, function_label
+            )
+            record = PersonRecord(
+                id=str(uuid.uuid4()),
+                name=identity.name,
+                title=identity.title,
+                company=identity.company,
+                identity_excerpt=identity.excerpt,
+                identity_confidence=identity.confidence,
+                responsibility_status=status,  # type: ignore[arg-type]
+                first_seen=identity.first_seen,
+                last_seen=identity.last_seen,
+                role_published_at=identity.role_published_at,
+                validity=validity_for(identity.last_seen, observed_on=observed_on),  # type: ignore[arg-type]
+                contradictions=identity.contradictions,
+                source_urls=identity.urls,
+                seniority=seniority_from_title(identity.title),
+                function_guess=function_guess_from_title(identity.title),
+                responsibilities=responsibility_lines or extract_responsibilities(identity.name, run.evidence),
+                activity=collect_activity(identity.name, run.observations, run.evidence),
+                footprint_topics=build_footprint(identity.name, run.evidence, run.observations),
+                authored_urls=[],
+                persona_id=map_persona(identity.title, deps.playbook),
+            )
+            record.authored_urls = [item.url for item in record.activity if item.authored]
+            resolved = resolve_freshness(
+                identity.name,
+                mentions,
+                run.evidence,
+                observed_on=observed_on,
+            )
+            record.validity = resolved.validity  # type: ignore[assignment]
+            record.role_freshness = resolved.role_freshness  # type: ignore[assignment]
+            record.evidence_classes = resolved.evidence_classes
+            record.current_ownership = resolved.current_ownership
+            record.historical_expertise = resolved.historical_expertise
+            level, evidence_ids = classify_ownership(
+                identity.name,
+                identity.title,
+                run.evidence,
+                observed_on=observed_on,
+                functions=run.affected_functions,
+            )
+            affiliation = resolve_affiliation(
+                identity.name,
+                identity.title,
+                run.evidence,
+                account_name=run.account_name,
+                domain=run.domain,
+                functions=run.affected_functions or ["platform"],
+                observed_on=observed_on,
+            )
+            record.affiliation = affiliation.affiliation  # type: ignore[assignment]
+            record.affiliation_evidence_ids = affiliation.affiliation_evidence_ids
+            record.role_state = affiliation.role_state  # type: ignore[assignment]
+            _apply_role_bridge(record, run, observed_on)
+            record.candidate_source_type = _candidate_source(identity.name, run.evidence)
+            record.role_evidence_ids = affiliation.role_evidence_ids
+            record.function_level = affiliation.function_level  # type: ignore[assignment]
+            record.person_function_evidence_ids = affiliation.function_evidence_ids
+            record.technical_activity = affiliation.technical_activity  # type: ignore[assignment]
+            record.activity_evidence_ids = affiliation.activity_evidence_ids
+            record.technical_responsibility = (
+                record.function_guess or (run.affected_functions[0] if run.affected_functions else "")
+            )
+            record.candidate_state = affiliation.candidate_state  # type: ignore[assignment]
+            if affiliation.role_state == "probable_current" and record.validity == "stale":
+                record.validity = "unknown"
+                record.role_freshness = "unknown"
+            if affiliation.ownership_level == "strong" and level not in {"explicit", "strong"}:
+                level = "strong"
+                evidence_ids = affiliation.ownership_evidence_ids
+            elif affiliation.ownership_level == "probable" and level in {"unknown", "weak"}:
+                level = "probable"
+                evidence_ids = affiliation.ownership_evidence_ids or evidence_ids
+            elif affiliation.ownership_level == "weak" and level == "unknown":
+                level = "weak"
+                evidence_ids = evidence_ids or affiliation.ownership_evidence_ids
+            if level not in {"explicit", "strong"}:
+                converged, converged_ids = converge_ownership(
+                    identity.name,
+                    identity.title,
+                    run.evidence,
+                    observed_on=observed_on,
+                    functions=run.affected_functions or ["platform"],
+                )
+                if converged == "strong":
+                    level = converged
+                    evidence_ids = converged_ids
+            record.ownership_level = level  # type: ignore[assignment]
+            record.ownership_evidence_ids = evidence_ids
+            _fill_role_report(run, record)
+            workload = level in {"explicit", "strong"}
+            record.candidate_class = candidate_class(identity.title, workload_connected=workload)  # type: ignore[assignment]
+            record.currentness = currentness_for(  # type: ignore[assignment]
+                artifact_date=identity.first_seen,
+                role_date=identity.role_published_at,
+                text=identity.excerpt,
+                observed_on=observed_on,
+            )
+            if record.role_state == "probable_current":
+                record.currentness = "probable_current"
+            elif record.role_state == "current":
+                record.currentness = "current"
+            record.candidate_priority_reason = priority_by_name.get(identity.name, "")
+            record.deep_researched = identity.name in researched
+            if record.deep_researched and record.ownership_level not in {"explicit", "strong"}:
+                function = run.affected_functions[0] if run.affected_functions else "platform"
+                problem = run.signals[0].label if run.signals else "the affected system"
+                record.next_query = next_owner_query(run.account_name, function, identity.name, problem)
+            if identity.contradictions:
+                reason = "contradictory identity"
+                decision = "reject"
+            elif record.validity == "stale":
+                reason = "role evidence is older than the freshness window"
+                decision = "reject"
+            elif status == "unknown":
+                reason = "responsibility not supported after verification"
+                decision = "reject"
+            else:
+                reason = "identity, role, and responsibility evidence found"
+                decision = "accept"
+            run.person_traces.append(
+                PersonSearchTrace(
+                    query="",
+                    candidate=identity.name,
+                    source=identity.urls[0] if identity.urls else "",
+                    finding=identity.excerpt[:180],
+                    decision=decision,  # type: ignore[arg-type]
+                    reason=reason,
+                )
+            )
+            people.append(record)
+        attributed, links = build_artifacts(
+            run.evidence, account_name=run.account_name, domain=run.domain
+        )
+        if attributed:
+            run.artifacts = attributed
+            run.artifact_links = links
+        else:
+            run.artifacts = [
+                TechnicalArtifact(
+                    source_url=item.url,
+                    url=item.url,
+                    topic=item.topic,
+                    author=item.author,
+                    published_at=item.published_at,
+                    evidence_id=item.evidence_id,
+                    evidence_ids=[item.evidence_id],
+                    kind=item.kind,
+                )
+                for item in artifacts_from_evidence(run.evidence, run.account_name)
+            ]
+        signal_name = run.signals[0].label if run.signals else ""
+        function_name = run.affected_functions[0] if run.affected_functions else ""
+        run.ownership_links = [
+            OwnershipLink(
+                signal=signal_name,
+                function=function_name,
+                artifact_url=item.source_url,
+                person_name=item.author,
+                current_role=next((person.title for person in people if person.name == item.author), ""),
+                current_function=function_name,
+                ownership_level=next(
+                    (person.ownership_level for person in people if person.name == item.author),
+                    "unknown",
+                ),
+                evidence_ids=[item.evidence_id],
+                affiliation=next((person.affiliation for person in people if person.name == item.author), ""),
+                role_state=next((person.role_state for person in people if person.name == item.author), ""),
+                function_level=next((person.function_level for person in people if person.name == item.author), ""),
+                technical_activity=next(
+                    (person.technical_activity for person in people if person.name == item.author),
+                    "",
+                ),
+            )
+            for item in run.artifacts
+        ]
+        run.evidence_edges = [
+            edge
+            for person in people
+            for edge in evidence_graph(
+                person.name,
+                AffiliationResolution(
+                    affiliation=person.affiliation,
+                    affiliation_evidence_ids=person.affiliation_evidence_ids,
+                    role_state=person.role_state,
+                    role_evidence_ids=person.role_evidence_ids,
+                    function_level=person.function_level,
+                    function_evidence_ids=person.person_function_evidence_ids,
+                ),
+                responsibility=person.technical_responsibility,
+                trigger="",
+                trigger_evidence_ids=[],
+                observed_on=person.role_published_at,
+            )
+        ]
+        run.people = people
+        _log(run, "verify", f"Verified {len(people)} people from fetched pages.")
+        return dump_run(run)
+
+    return node
+
+
+def _attach_ownership_window(run: RunModel, name: str) -> None:
+    """Keep a short public window when ownership is split across neighboring sentences."""
+    from app.research.extract import classify_sentence
+
+    for obs in run.observations:
+        text = obs.sanitized_text
+        idx = text.find(name)
+        if idx < 0:
+            continue
+        window = " ".join(text[idx : idx + 700].split())
+        if "teams are building" not in window.lower():
+            continue
+        owner_at = window.lower().find("teams are building")
+        if re.search(r"\b[A-Z][a-z]+ [A-Z][a-z]+,", window[len(name) : owner_at]):
+            continue
+        topics, supports, contradicts, gap = classify_sentence(window)
+        if not topics:
+            continue
+        already = [
+            item
+            for item in run.evidence
+            if name in item.excerpt and item.source_url == obs.url and len(item.excerpt) > 240
+        ]
+        if already:
+            return
+        run.evidence.append(
+            Evidence(
+                id=str(uuid.uuid4()),
+                observation_id=obs.id,
+                excerpt=window[:500],
+                source_url=obs.url,
+                source_title=obs.title,
+                source_type=obs.source_type,
+                published_at=obs.published_at,
+                observed_at=obs.observed_at,
+                confidence=0.62,
+                lineage=[obs.id],
+                topics=topics,
+                supports_problem=supports,
+                contradicts_redis=contradicts,
+                is_explicit_gap=gap,
+            )
+        )
+        return
+
+
+def _discovery_lineage(query: str, hits: Sequence[object], url: str) -> list[str]:
+    from app.research.search import SearchHit
+
+    matched = next((hit for hit in hits if isinstance(hit, SearchHit) and hit.url == url), None)
+    provider = matched.provider if matched is not None else ""
+    lineage = ["search_snippet", f"query:{query}"]
+    if provider:
+        lineage.append(f"provider:{provider}")
+    return lineage
+
+
+def _record_entity_relations(run: RunModel, qualified: object) -> None:
+    from app.person.qualify import QualifiedPerson
+
+    if not isinstance(qualified, QualifiedPerson):
+        return
+    for relation in qualified.relations:
+        run.evidence.append(
+            Evidence(
+                id=str(uuid.uuid4()),
+                observation_id="entity",
+                excerpt=f"{qualified.context} [{relation.relation}: {relation.object}]",
+                source_url=qualified.source_url,
+                source_title=qualified.name,
+                source_type=qualified.source_type,
+                published_at=None,
+                observed_at=run.observed_at,
+                confidence=relation.confidence,
+                lineage=["gliner", relation.relation],
+                topics=[],
+                supports_problem=False,
+                contradicts_redis=False,
+                is_explicit_gap=False,
+                evidence_type="entity_relation",
+                field=relation.relation,
+                value=relation.object,
+                raw_text=qualified.context,
+            )
+        )
+
+
+def _run_role_bridge(run: RunModel, deps: PipelineDeps, candidates: Sequence[object]) -> None:
+    from app.person.current_role_bridge import resolve_role_bridge, source_queries, source_rank
+    from app.research.search import SearchHit
+
+    for view in candidates:
+        name = str(getattr(view, "name", ""))
+        if getattr(view, "entity_type", "") != "PERSON":
+            continue
+        queries = source_queries(name, run.account_name, run.domain)[: run.role_bridge_budget]
+        discovered: list[SearchHit] = []
+        seen_urls: set[str] = set()
+        fetched = 0
+        used = 0
+        found_page_role = False
+        for query in queries:
+            if found_page_role:
+                break
+            import time
+
+            time.sleep(0.35)
+            hits = _bridge_search(deps, query, limit=3)
+            typed = [hit for hit in hits if isinstance(hit, SearchHit)]
+            used += 1
+            run.role_queries += 1
+            run.role_results += len(typed)
+            _note_search(run, query, typed)
+            for hit in typed:
+                if hit.url in seen_urls or "linkedin.com" in hit.url:
+                    continue
+                seen_urls.add(hit.url)
+                discovered.append(hit)
+            discovered.sort(key=lambda hit: source_rank(hit.url, run.domain))
+            for hit in discovered:
+                if source_rank(hit.url, run.domain) >= 100 or not is_allowed_public_url(hit.url):
+                    continue
+                if hit.url in run.fetched_urls:
+                    continue
+                _ingest_page(run, deps, hit.url, hit.published_at, person_slot="role")
+                fetched += 1
+                resolved_now = resolve_role_bridge(
+                    name, run.evidence, account_name=run.account_name, observed_on=run.observed_at.date()
+                )
+                if resolved_now.role_state == "current" and resolved_now.confidence >= 0.7:
+                    found_page_role = True
+                    run.role_hits += 1
+                    break
+                if fetched >= 3:
+                    break
+        resolved = resolve_role_bridge(
+            name, run.evidence, account_name=run.account_name, observed_on=run.observed_at.date()
+        )
+        if resolved.role_state in {"current", "probable_current"}:
+            run.role_resolutions += 1
+        else:
+            run.role_failures += 1
+        run.role_bridge_reports.append(
+            RoleBridgeReport(
+                candidate=name,
+                role_queries=used,
+                sources_discovered=len(discovered),
+                sources_fetched=fetched,
+                role_title=resolved.title,
+                role_confidence=resolved.confidence,
+                currentness=resolved.role_state,
+                function=resolved.function,
+                function_confidence=resolved.function_level,
+                ownership="pending",
+                why=_role_why(resolved.role_state, resolved.title),
+            )
+        )
+        run.person_traces.append(
+            PersonSearchTrace(
+                query=queries[0] if queries else "",
+                candidate=name,
+                source=resolved.source,
+                finding=f"{resolved.role_state}: {resolved.title or 'unknown'}",
+                decision="accept" if resolved.role_state in {"current", "probable_current"} else "reject",
+                reason="public page verifies the role; LinkedIn pages are not fetched",
+            )
+        )
+
+
+def _role_why(state: str, title: str) -> str:
+    if state == "current" and title:
+        return "a fetched public page states the role"
+    if state == "probable_current":
+        return "only a search snippet states the role"
+    return "no public page stated a current role"
+
+
+def _ownership_why(record: PersonRecord) -> str:
+    if record.ownership_level in {"explicit", "strong"}:
+        return "current role, function, artifact, and workload evidence agree"
+    if record.technical_activity == "strong":
+        return "technical artifact exists, but workload ownership not established"
+    return "role or function evidence is incomplete"
+
+
+def _fill_role_report(run: RunModel, record: PersonRecord) -> None:
+    for report in run.role_bridge_reports:
+        if report.candidate != record.name:
+            continue
+        report.ownership = record.ownership_level
+        report.function = record.function_guess or report.function or "unknown"
+        report.function_confidence = record.function_level
+        report.role_title = record.title or report.role_title
+        report.currentness = record.role_state
+        report.role_confidence = record.role_confidence or report.role_confidence
+        report.why = _ownership_why(record)
+
+
+def _bridge_search(deps: PipelineDeps, query: str, *, limit: int) -> list[object]:
+    """Search on the role-bridge budget. Do not spend the research search budget."""
+    provider = deps.search
+    calls = getattr(provider, "calls", None)
+    budget = getattr(provider, "budget", None)
+    if isinstance(calls, int) and isinstance(budget, int) and calls >= budget:
+        provider.budget = calls + 1  # type: ignore[attr-defined]
+    try:
+        hits: list[object] = list(provider.search(query, limit=limit))
+    except Exception:
+        hits = []
+    if isinstance(calls, int):
+        provider.calls = calls  # type: ignore[attr-defined]
+    if isinstance(budget, int):
+        provider.budget = budget  # type: ignore[attr-defined]
+    return hits
+
+
+def _apply_role_bridge(record: PersonRecord, run: RunModel, observed_on: object) -> None:
+    from datetime import date
+
+    from app.person.current_role_bridge import resolve_role_bridge
+
+    if not isinstance(observed_on, date):
+        return
+    resolved = resolve_role_bridge(
+        record.name,
+        run.evidence,
+        account_name=run.account_name,
+        observed_on=observed_on,
+    )
+    record.role_history = resolved.history
+    record.current_employer = resolved.employer or record.company or run.account_name
+    record.role_confidence = resolved.confidence
+    record.role_as_of = resolved.as_of
+    record.role_source = resolved.source
+    if resolved.role_state == "historical" and resolved.employer.lower() != run.account_name.lower():
+        record.role_state = "historical"
+        record.role_evidence_ids = resolved.evidence_ids or record.role_evidence_ids
+    elif resolved.role_state in {"current", "probable_current"} and record.role_state in {"unknown", "historical"}:
+        record.role_state = resolved.role_state  # type: ignore[assignment]
+        record.title = resolved.title or record.title
+        record.role_evidence_ids = resolved.evidence_ids or record.role_evidence_ids
+    if resolved.function_level == "strong" and record.function_level in {"unknown", "weak"}:
+        record.function_level = "strong"
+        record.function_guess = resolved.function
+        record.function_source = resolved.function_source
+
+
+def _mentions_from_metadata(
+    evidence: list[Evidence], existing: Sequence[object], account_name: str
+) -> list[Mention]:
+    from app.person.qualify import qualify_person
+
+    known = {getattr(item, "name", "") for item in existing}
+    found: list[Mention] = []
+    for item in evidence:
+        if item.evidence_type not in {"author_metadata", "json_ld", "speaker_metadata"}:
+            continue
+        name = item.value.strip()
+        if not name or name in known:
+            continue
+        if qualify_person(name, item.excerpt or name, account_name, source_url=item.source_url) is None:
+            continue
+        title = ""
+        marker = " at "
+        if "," in item.excerpt and marker in item.excerpt:
+            title = item.excerpt.split(",", 1)[1].split(marker, 1)[0].strip(" .")
+        found.append(
+            Mention(name=name, title=title, url=item.source_url, excerpt=item.excerpt, published_at=item.published_at)
+        )
+        known.add(name)
+    return found
+
+
+def _candidate_source(name: str, evidence: list[Evidence]) -> str:
+    named = [item for item in evidence if name in item.excerpt or name in item.value]
+    if any(item.source_type == "search_snippet" for item in named):
+        return "search_snippet"
+    if any(item.field == "team_member" or item.source_type == "biography" for item in named):
+        return "team_page"
+    if any(item.evidence_type == "speaker_metadata" or item.source_type == "conference" for item in named):
+        return "speaker_page"
+    if any("github.com" in item.source_url for item in named):
+        return "github"
+    if any(item.evidence_type == "interviewee" or "hosting " in item.excerpt.lower() for item in named):
+        return "interview"
+    if any(item.source_type == "job_posting" for item in named):
+        return "job_posting"
+    if any(item.evidence_type in {"author_metadata", "json_ld"} for item in named):
+        return "technical_artifact"
+    if any(item.source_type in {"blog", "engineering_blog", "company_news"} for item in named):
+        return "company_page"
+    return ""
+
+
+def _note_search(run: RunModel, query: str, hits: Sequence[object]) -> None:
+    from app.research.search import SearchHit
+
+    typed = [hit for hit in hits if isinstance(hit, SearchHit)]
+    run.queries_executed += 1
+    run.results_examined += len(typed)
+    run.search_log.append(
+        SearchExecution(
+            query=query,
+            result_count=len(typed),
+            urls=[hit.url for hit in typed],
+            engines=[hit.engine for hit in typed if hit.engine],
+        )
+    )
+    moment = datetime.now(UTC)
+    rows = typed or []
+    if not rows:
+        run.search_traces.append(
+            SearchTrace(
+                provider=run.search_endpoint or "unknown",
+                provider_mode=run.search_mode,
+                query=query,
+                timestamp=moment,
+                result_count=0,
+            )
+        )
+    for hit in rows:
+        run.search_traces.append(
+            SearchTrace(
+                provider=hit.provider or run.search_endpoint or "unknown",
+                provider_mode=run.search_mode,
+                query=query,
+                timestamp=moment,
+                result_count=len(rows),
+                result_url=hit.url,
+                result_title=hit.title,
+                result_snippet=hit.snippet,
+                result_source=hit.source or hit.engine,
+                search_latency_ms=hit.latency_ms,
+            )
+        )
+
+
+def _record_snippet_leads(run: RunModel, hits: Sequence[object], query: str) -> None:
+    from app.research.search import SearchHit
+
+    typed = [hit for hit in hits if isinstance(hit, SearchHit)]
+    extracted, raw_count, rejected_count, duplicates = extract_names(typed, run.account_name, run.domain)
+    run.names_extracted += raw_count
+    run.names_rejected += rejected_count
+    run.names_duplicated += duplicates
+    for item in extracted:
+        if any(lead.name == item.name and lead.url == item.url for lead in run.snippet_leads):
+            continue
+        run.snippet_leads.append(
+            SnippetLead(name=item.name, title=item.title, url=item.url, excerpt=item.excerpt, query=query)
+        )
+        run.person_traces.append(
+            PersonSearchTrace(
+                query=query,
+                candidate=item.name,
+                source=item.url,
+                finding=f"{item.tier}: {item.excerpt[:160]}",
+                decision="accept",
+                reason="plausible name connected to the company in a public search result",
+            )
+        )
+    for mention in candidates_from_hits(typed, run.account_name, query):
+        if any(lead.name == mention.name and lead.url == mention.url for lead in run.snippet_leads):
+            continue
+        run.snippet_leads.append(
+            SnippetLead(
+                name=mention.name,
+                title=mention.title,
+                url=mention.url,
+                excerpt=mention.excerpt,
+                query=query,
+            )
+        )
+        run.person_traces.append(
+            PersonSearchTrace(
+                query=query,
+                candidate=mention.name,
+                source=mention.url,
+                finding=mention.excerpt[:180],
+                decision="accept",
+                reason="snippet names the person, company, and role; identity is not verified yet",
+            )
+        )
+        run.evidence.append(
+            Evidence(
+                id=str(uuid.uuid4()),
+                observation_id="snippet",
+                excerpt=mention.excerpt,
+                source_url=mention.url,
+                source_title=mention.title,
+                source_type="search_snippet",
+                published_at=mention.published_at,
+                observed_at=run.observed_at,
+                confidence=0.45,
+                lineage=_discovery_lineage(query, typed, mention.url),
+                topics=[],
+                supports_problem=False,
+                contradicts_redis=False,
+                is_explicit_gap=False,
+                evidence_type="search_snippet",
+                field="discovery",
+                raw_text=mention.excerpt[:240],
+            )
+        )
+    from app.research.structured import snippet_role_facts
+
+    for hit in typed:
+        for fact in snippet_role_facts(
+            title=hit.title,
+            snippet=hit.snippet,
+            url=hit.url,
+            account_name=run.account_name,
+            observed_at=run.observed_at,
+            provider=hit.provider,
+            query=query,
+        ):
+            if any(item.id == fact.id for item in run.evidence):
+                continue
+            run.evidence.append(fact)
+
+
+def _verify_snippet_leads(
+    run: RunModel,
+    deps: PipelineDeps,
+    mentions: Sequence[object],
+    only: set[str] | None = None,
+) -> None:
+    known = {getattr(mention, "name", "") for mention in mentions}
+    for lead in run.snippet_leads:
+        if lead.name in known:
+            continue
+        if only is not None and lead.name not in only:
+            continue
+        if run.verification_pages_used >= run.verification_page_budget:
+            run.person_traces.append(
+                PersonSearchTrace(
+                    query=lead.query,
+                    candidate=lead.name,
+                    source=lead.url,
+                    finding=lead.title,
+                    decision="reject",
+                    reason="snippet candidate was not fetched before the verification budget ended",
+                )
+            )
+            continue
+        query = f'"{lead.name}" {run.account_name}'
+        if run.verification_queries_used >= run.verification_query_budget:
+            continue
+        hits = deps.search.search(query, limit=3)
+        run.verification_queries_used += 1
+        _note_search(run, query, hits)
+        if lead.url not in run.fetched_urls and is_allowed_public_url(lead.url):
+            _ingest_page(run, deps, lead.url, None, person_slot="verification")
+        fresh = [
+            hit
+            for hit in hits
+            if hit.url not in run.fetched_urls and hit.url != lead.url and is_allowed_public_url(hit.url)
+        ]
+        for hit in fresh[:1]:
+            if run.verification_pages_used >= run.verification_page_budget:
+                break
+            _ingest_page(run, deps, hit.url, hit.published_at, person_slot="verification")
+        run.person_traces.append(
+            PersonSearchTrace(
+                query=query,
+                candidate=lead.name,
+                source=lead.url,
+                finding=f"{len(fresh)} independent hits",
+                decision="accept" if fresh else "reject",
+                reason=(
+                    "searching an independent source for the snippet candidate"
+                    if fresh
+                    else "no independent public page was found for the snippet candidate"
+                ),
+            )
+        )
+
+
+def verify_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
+    del deps
+    return match_people
+
+
+def research_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
+    del deps
+
+    def node(state: GraphState) -> GraphState:
+        run = load_run(state)
+        run.signals = detect_signals(run.evidence)
+        run.functions = detect_functions(run.evidence) or run.functions
+        _log(run, "people", f"Technical footprint recorded for {len(run.people)} people.")
+        return dump_run(run)
+
+    return node
+
+
+def match_people(state: GraphState) -> GraphState:
+    run = load_run(state)
+    observed_on = run.observed_at.date()
+    for person in run.people:
+        person.fit = assess_fit(
+            person,
+            run.evidence,
+            run.functions,
+            observed_on=observed_on,
+            window_days=180,
+        )
+        person.selection_status = selection_status_for(person)  # type: ignore[assignment]
+    verified = [person for person in run.people if person.selection_status == "verified_person"]
+    weak = [person for person in run.people if person.selection_status == "weak_candidate"]
+    if verified:
+        run.person_outcome = "verified_person"
+    elif weak:
+        run.person_outcome = "weak_candidate"
+    else:
+        run.person_outcome = "no_verified_person"
+    run.people = rank_people(run.people)
+    problem = strongest_problem(run.signals)
+    label = problem.label if problem else ""
+    if len(run.people) >= 2:
+        comparison = explain_pair(run.people[0], run.people[1])
+    elif run.people:
+        comparison = "No second public person was available to compare."
+    else:
+        comparison = "No public person was established."
+    for index, person in enumerate(run.people):
+        other = comparison if index == 0 else "Ranked behind the lead person on the explicit fit dimensions."
+        person.dossier = build_dossier(person, comparison=other, problem_label=label)
+    _log(run, "match", "Scored role, ownership, technical fit, timing, evidence, seniority, and contact confidence.")
+    return dump_run(run)
+
+
+def why_now_node(state: GraphState) -> GraphState:
+    run = load_run(state)
+    run.why_now = detect_why_now(
+        run.evidence, observed_on=run.observed_at.date(), window_days=ACCOUNT_TRIGGER_DAYS
+    )
+    apply_why_now(run.person_opportunities, run.why_now, run.evidence, run.people)
+    for person in run.people:
+        named = [item for item in run.why_now if person.name in " ".join(item.summary for item in run.why_now)]
+        person.trigger_to_function = run.affected_functions[0] if run.why_now and run.affected_functions else ""
+        person.trigger_to_person = person.name if any(person.name in event.summary for event in run.why_now) else ""
+        del named
+        if person.trigger_to_function and person.technical_responsibility:
+            run.evidence_edges.append(
+                EvidenceEdge(
+                    source=person.technical_responsibility,
+                    target=person.trigger_to_function,
+                    relation="account_trigger",
+                    evidence_ids=[event.id for event in run.why_now],
+                    confidence=0.7,
+                    observed_on=run.observed_at.date(),
+                )
+            )
+    _log(run, "why_now", f"Recorded {len(run.why_now)} why-now events. Buying intent remains false.")
+    return dump_run(run)
+
+
+def map_redis(state: GraphState) -> GraphState:
+    run = load_run(state)
+    run.opportunities = map_opportunities(run.evidence)
+    primary = next((item for item in run.opportunities if item.is_primary), None)
+    apply_redis(run.person_opportunities, run.opportunities)
+    label = "none" if primary is None else f"{primary.use_case_id}:{primary.relevance}"
+    _log(run, "redis", f"Primary Redis hypothesis is {label}.")
+    return dump_run(run)
+
+
+def build_person_opportunities(state: GraphState) -> GraphState:
+    run = load_run(state)
+    run.person_opportunities = build_opportunities(
+        account_id=run.account_id,
+        people=run.people,
+        signals=run.signals,
+        evidence=run.evidence,
+        observed_at=run.observed_at,
+    )
+    _log(run, "person_opportunity", f"Built {len(run.person_opportunities)} person opportunities.")
+    return dump_run(run)
+
+
+def decide_contact_node(state: GraphState) -> GraphState:
+    run = load_run(state)
+    by_id = {person.id: person for person in run.people}
+    for row in run.person_opportunities:
+        row.decision = decide_contact(row, by_id.get(row.person_id))  # type: ignore[assignment]
+        row.updated_at = run.observed_at
+    _log(run, "decide_contact", "Contact decision uses problem, ownership, trigger, and Redis hypothesis.")
+    return dump_run(run)
+
+
+def decide_channel_node(state: GraphState) -> GraphState:
+    run = load_run(state)
+    for row in run.person_opportunities:
+        row.recommended_channel = decide_channel(row)  # type: ignore[assignment]
+    assign_threads(run.person_opportunities)
+    _log(run, "decide_channel", "Channel and thread are per person. The same message is not reused.")
+    return dump_run(run)
+
+
+def select_templates(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
+    def node(state: GraphState) -> GraphState:
+        run = load_run(state)
+        person = next((item for item in run.people if item.selection_status == "verified_person"), None)
+        signals = {item.signal_type for item in run.signals}
+        timings = {item.event_type for item in run.why_now}
+        persona = None if person is None else person.persona_id
+        matched = compatible_templates(
+            deps.playbook,
+            persona_id=persona,
+            signal_types=signals,
+            why_now_types=timings,
+        )
+        run.compatible_template_ids = [item.id for item in matched]
+        run.template_channels = {item.id: item.channel for item in matched}
+        chosen = choose_template(matched, signals)
+        cadence = deps.playbook.cadences[0].id if deps.playbook.cadences else "technical_review_first"
+        if chosen is not None and person is not None and person.persona_id is not None:
+            run.template_choice = TemplateChoice(
+                template_id=chosen.id,
+                channel=chosen.channel,
+                persona_id=person.persona_id,
+                cadence_id=cadence,
+                auto_send=False,
+            )
+            primary = next(
+                (row for row in run.person_opportunities if row.person_id == person.id),
+                None,
+            )
+            if primary is not None and primary.recommended_channel == chosen.channel:
+                primary.template_id = chosen.id
+        _log(run, "playbook", f"Compatible templates: {run.compatible_template_ids or ['none']}.")
+        return dump_run(run)
+
+    return node
+
+
+def laya_node(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
+    def node(state: GraphState) -> GraphState:
+        run = load_run(state)
+        run.laya = deps.kernel.decide(run)
+        if run.laya is not None and run.laya.decision_mode == "heuristic":
+            primary = next(
+                (row for row in run.person_opportunities if row.thread_role == "primary_contact"),
+                None,
+            )
+            run.laya.strongest_person_opportunity_id = None if primary is None else primary.id
+            policy = next(
+                (row for row in run.person_opportunities if row.decision == "contact_now"),
+                next((row for row in run.person_opportunities if row.decision == "human_review"), primary),
+            )
+            run.laya.opportunity_tier = "" if policy is None else policy.opportunity_tier
+            run.laya.outreach_eligibility = "research_more" if policy is None else policy.decision
+            run.laya.contact_decision = "research_more"
+            run.laya.channel = None if policy is None else policy.recommended_channel
+            run.laya.thread_role = "none" if primary is None else primary.thread_role
+            run.laya.notes.append(
+                "Untrained Laya predicts tier and channel but does not override the evidence policy."
+            )
+            run.laya.next_step = "research_more"
+        _log(
+            run,
+            "laya",
+            f"Shadow provider {run.laya.provider} next_step={run.laya.next_step}. Not sent.",
+        )
+        return dump_run(run)
+
+    return node
+
+
+def _evidence_by_id(run: RunModel) -> dict[str, object]:
+    return {item.id: item for item in run.evidence}
+
+
+def recommend(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
+    def node(state: GraphState) -> GraphState:
+        run = load_run(state)
+        person = next((item for item in run.people if item.selection_status == "verified_person"), None)
+        others = [item for item in run.people if person is None or item.id != person.id]
+        runner = others[0] if others else None
+        problem = strongest_problem(run.signals)
+        primary = next((item for item in run.opportunities if item.is_primary), None)
+        by_id = {item.id: item for item in run.evidence}
+        supporting = []
+        contradicting = []
+        if primary is not None:
+            supporting = [by_id[item_id] for item_id in primary.supporting_evidence_ids if item_id in by_id]
+            contradicting = [
+                by_id[item_id] for item_id in primary.contradicting_evidence_ids if item_id in by_id
+            ]
+        unknowns = [
+            "No verified public email or phone.",
+            "Buying authority is not established.",
+            "Technical relevance is not buying intent.",
+        ]
+        if primary is not None:
+            unknowns.extend(primary.unknowns)
+        signal_text = problem.label if problem else "No technical problem was established from public evidence."
+        why = (
+            " ".join(event.summary for event in run.why_now)
+            if run.why_now
+            else "No recent public trigger was established."
+        )
+        if primary is None:
+            hypothesis = "No Redis use case was mapped."
+        else:
+            mappings = [
+                f"{item.use_case_id}={item.relevance}"
+                for item in run.opportunities
+                if item.id != primary.id
+            ]
+            hypothesis = (
+                f"{primary.name} is {primary.relevance}. {primary.hypothesis} "
+                f"Falsifier: {primary.falsifier} Other mappings: {', '.join(mappings)}."
+            )
+        fit = None if person is None else person.fit
+        ready = (
+            person is not None
+            and fit is not None
+            and fit.problem_ownership >= 0.6
+            and fit.technical_relevance >= 0.4
+            and fit.public_evidence >= 0.5
+            and primary is not None
+            and primary.relevance in {"plausible", "strongly_supported"}
+            and run.template_choice is not None
+        )
+        disposition = "review_draft" if ready else "research_more"
+        if not run.signals and not run.people:
+            disposition = "ignore"
+        elif primary is not None and primary.relevance == "not_relevant" and not run.people:
+            disposition = "ignore"
+        review_row = next((row for row in run.person_opportunities if row.decision == "human_review"), None)
+        draft = None
+        channel = None
+        template_id = None
+        if review_row is not None and disposition != "review_draft":
+            reviewed = next((item for item in run.people if item.id == review_row.person_id), None)
+            if reviewed is not None:
+                person = reviewed
+                disposition = "human_review"
+                channel = "email"
+                draft = exploratory_message(
+                    name=reviewed.name,
+                    role=reviewed.title or "unknown",
+                    account=run.account_name,
+                    problem=signal_text,
+                )
+                review_row.recommended_channel = "email"
+        if person is not None and run.template_choice is not None and disposition == "review_draft":
+            template = next(
+                item for item in deps.playbook.templates if item.id == run.template_choice.template_id
+            )
+            channel = template.channel
+            template_id = template.id
+            draft = render_template(
+                template,
+                {
+                    "person_name": person.name,
+                    "role": person.title,
+                    "account_name": run.account_name,
+                    "signal_summary": signal_text,
+                    "why_now": why,
+                    "hypothesis": hypothesis,
+                    "unknowns": "; ".join(dict.fromkeys(unknowns)),
+                    "alternatives": ", ".join(primary.alternatives) if primary else "[unknown]",
+                },
+            )
+        why_person = "No public person was established from evidence."
+        why_not = ""
+        if person is not None and person.dossier is not None:
+            why_person = person.dossier.why_this_person_instead_of_another
+            why_person = f"{person.dossier.appears_to_own} {why_person}"
+        if runner is not None and person is not None:
+            why_not = explain_pair(person, runner)
+        answers = {
+            "WHO should I contact?": "unknown" if person is None else person.name,
+            "WHY this person?": why_person,
+            "WHAT technical problem is relevant?": signal_text,
+            "WHAT evidence connects this person to it?": _connection(run, person.name) if person else "none",
+            "WHY NOW?": why,
+            "WHAT Redis use case could plausibly matter?": hypothesis,
+            "WHAT is unknown?": "; ".join(dict.fromkeys(unknowns)),
+            "WHAT should I do next?": (
+                "Review the draft. Do not send it."
+                if disposition == "review_draft"
+                else "Human review of an exploratory note. Ownership is probable, not verified. Do not send it."
+                if disposition == "human_review"
+                else "Research more before preparing outreach."
+                if disposition == "research_more"
+                else "Ignore for now."
+            ),
+        }
+        confidence: dict[str, float | str] = {
+            "label": "medium" if ready else "low",
+            "contact_inferred_automatically": 0,
+        }
+        if fit is not None:
+            confidence.update(
+                {
+                    "role_relevance": fit.role_relevance,
+                    "problem_ownership": fit.problem_ownership,
+                    "technical_relevance": fit.technical_relevance,
+                    "timing_relevance": fit.timing_relevance,
+                    "public_evidence": fit.public_evidence,
+                    "seniority": fit.seniority,
+                    "contact_confidence": fit.contact_confidence,
+                }
+            )
+        problem = strongest_problem(run.signals)
+        primary_case = next((item for item in run.opportunities if item.is_primary), None)
+        account_hypothesis = primary_case is not None and primary_case.relevance in {
+            "plausible",
+            "strongly_supported",
+        }
+        run.function_evidence_ids = [item.id for item in job_function_evidence(run.evidence)]
+        owner_levels = {"explicit", "strong"}
+        close = next(
+            (
+                person
+                for person in run.people
+                if person.deep_researched and person.ownership_level not in owner_levels
+            ),
+            None,
+        )
+        missing, question = research_gap(
+            account_name=run.account_name,
+            problem=problem.label if problem else "",
+            has_owner=any(person.ownership_level in owner_levels for person in run.people),
+            has_trigger=any(row.why_now_credible for row in run.person_opportunities),
+            has_hypothesis=account_hypothesis or any(row.redis_credible for row in run.person_opportunities),
+            functions=run.affected_functions,
+            candidate_name="" if close is None else close.name,
+        )
+        run.research_missing = missing
+        run.next_research_question = question
+        if missing:
+            _log(run, "research_more", "MISSING: " + "; ".join(missing) + f" NEXT: {question}")
+        run.action_id = str(uuid.uuid4())
+        for row in run.person_opportunities:
+            if row.thread_role == "primary_contact":
+                row.action_id = run.action_id
+        run.recommendation = Recommendation(
+            id=str(uuid.uuid4()),
+            person="unknown" if person is None else person.name,
+            role="unknown" if person is None else person.title,
+            why_this_person=why_person,
+            technical_signal=signal_text,
+            why_now=why,
+            redis_hypothesis=hypothesis,
+            supporting_evidence=supporting,
+            contradicting_evidence=contradicting,
+            unknown=list(dict.fromkeys(unknowns)),
+            channel=channel,
+            template_id=template_id,
+            draft=draft,
+            confidence=confidence,
+            fit=fit,
+            runner_up=None if runner is None else runner.name,
+            why_not_runner_up=why_not,
+            disposition=disposition,  # type: ignore[arg-type]
+            laya_shadow=run.laya,
+            answers=answers,
+        )
+        _log(run, "recommend", f"Disposition {disposition}. Status pending_human_review. sent=false.")
+        return dump_run(run)
+
+    return node
+
+
+def _connection(run: RunModel, name: str) -> str:
+    lines = [item.excerpt for item in run.evidence if name in item.excerpt]
+    return " | ".join(lines[:4]) if lines else "No excerpt names this person on the technical problem."
+
+
+def write_sheets(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
+    def node(state: GraphState) -> GraphState:
+        run = load_run(state)
+        rec = run.recommendation
+        deps.sheets.ensure_tabs()
+        deps.sheets.append(
+            "ACCOUNTS",
+            {
+                "account_id": run.account_id,
+                "name": run.account_name,
+                "domain": run.domain,
+                "run_id": run.run_id,
+                "observed_at": run.observed_at.isoformat(),
+            },
+        )
+        for person in run.people:
+            fit = person.fit
+            deps.sheets.append(
+                "PEOPLE",
+                {
+                    "person_id": person.id,
+                    "name": person.name,
+                    "role": person.title,
+                    "role_relevance": "" if fit is None else f"{fit.role_relevance:.2f}",
+                    "problem_ownership": "" if fit is None else f"{fit.problem_ownership:.2f}",
+                    "technical_relevance": "" if fit is None else f"{fit.technical_relevance:.2f}",
+                    "timing_relevance": "" if fit is None else f"{fit.timing_relevance:.2f}",
+                    "public_evidence": "" if fit is None else f"{fit.public_evidence:.2f}",
+                    "seniority": "" if fit is None else f"{fit.seniority:.2f}",
+                    "contact_confidence": "" if fit is None else f"{fit.contact_confidence:.2f}",
+                    "why_this_person": (
+                        "" if person.dossier is None else person.dossier.why_this_person_instead_of_another
+                    ),
+                    "sources": ", ".join(person.source_urls),
+                },
+            )
+        for opp in run.opportunities:
+            deps.sheets.append(
+                "OPPORTUNITIES",
+                {
+                    "id": opp.id,
+                    "use_case": opp.use_case_id,
+                    "relevance": opp.relevance,
+                    "hypothesis": opp.hypothesis,
+                    "supporting_evidence": ", ".join(opp.supporting_evidence_ids),
+                    "contradicting_evidence": ", ".join(opp.contradicting_evidence_ids),
+                    "unknowns": " | ".join(opp.unknowns),
+                    "alternatives": ", ".join(opp.alternatives),
+                    "falsifier": opp.falsifier,
+                    "is_primary": str(opp.is_primary).lower(),
+                },
+            )
+        if rec is not None:
+            deps.sheets.append(
+                "ACTIONS",
+                {
+                    "action_id": run.action_id or "",
+                    "person": rec.person,
+                    "channel": rec.channel or "",
+                    "template": rec.template_id or "",
+                    "status": rec.status,
+                    "sent": "false",
+                    "draft": rec.draft or "",
+                },
+            )
+        for entry in run.logs:
+            deps.sheets.append(
+                "RESEARCH LOG",
+                {"cycle": str(entry.cycle), "node": entry.node, "message": entry.message},
+            )
+        deps.sheets.append(
+            "OUTCOMES",
+            {
+                "action_id": run.action_id or "",
+                "result": "pending",
+                "notes": "V1 stores outcomes and does not change ranking.",
+                "ranking_updated": "false",
+            },
+        )
+        _log(run, "sheets", "Wrote ACCOUNTS, PEOPLE, OPPORTUNITIES, ACTIONS, RESEARCH LOG, OUTCOMES.")
+        return dump_run(run)
+
+    return node
