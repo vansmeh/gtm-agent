@@ -461,7 +461,14 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     if run.verification_pages_used >= run.verification_page_budget:
                         break
                     _ingest_page(run, deps, hit.url, hit.published_at, person_slot="verification")
-        _run_role_bridge(run, deps, prioritized[:5])
+        from app.person.entity import classify_entity
+
+        people_first = [
+            view
+            for view in prioritized
+            if classify_entity(view.name, view.excerpt) == "PERSON"
+        ]
+        _run_role_bridge(run, deps, people_first[:5])
         for view in prioritized[:5]:
             if run.deep_queries_used >= run.deep_query_budget:
                 run.person_traces.append(
