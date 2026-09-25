@@ -833,11 +833,17 @@ def _run_role_bridge(run: RunModel, deps: PipelineDeps, candidates: Sequence[obj
 
 
 def _bridge_search(deps: PipelineDeps, query: str, *, limit: int) -> list[object]:
+    """Search on the role-bridge budget. Do not spend the research search budget."""
     provider = deps.search
     calls = getattr(provider, "calls", None)
+    budget = getattr(provider, "budget", None)
+    if isinstance(calls, int) and isinstance(budget, int) and calls >= budget:
+        provider.budget = calls + 1  # type: ignore[attr-defined]
     hits: list[object] = list(provider.search(query, limit=limit))
     if isinstance(calls, int):
         provider.calls = calls  # type: ignore[attr-defined]
+    if isinstance(budget, int):
+        provider.budget = budget  # type: ignore[attr-defined]
     return hits
 
 
