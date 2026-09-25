@@ -402,19 +402,45 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     published_at=None,
                 )
             )
-        from app.person.qualify import qualify_person
+        from app.person.company_link import linked_page_people
+        from app.person.qualify import explain_qualification
 
+        known_names = {item.name for item in views}
+        for obs in run.observations:
+            if obs.poisoned:
+                continue
+            for name, context, _relationship in linked_page_people(
+                obs.sanitized_text, obs.url, obs.source_type, run.account_name, run.domain
+            ):
+                if name in known_names or len(views) >= cap:
+                    continue
+                known_names.add(name)
+                views.append(
+                    CandidateView(
+                        name=name,
+                        title="",
+                        company=run.account_name,
+                        url=obs.url,
+                        excerpt=context,
+                        published_at=obs.published_at,
+                    )
+                )
         kept: list[CandidateView] = []
         for view in views:
-            qualified = qualify_person(
+            qualified, reason = explain_qualification(
                 view.name,
                 view.excerpt,
                 run.account_name,
                 source_url=view.url,
                 source_type="untrusted_web",
+                domain=run.domain,
             )
+            run.persons_extracted += 1
             if qualified is None:
-                view.reject_reason = "entity is not a person in company context"
+                run.link_rejected += 1
+                if len(run.link_rejection_reasons) < 20:
+                    run.link_rejection_reasons.append(f"{view.name}: {reason}")
+                view.reject_reason = reason or "no company association"
                 run.person_traces.append(
                     PersonSearchTrace(
                         query="",
@@ -426,6 +452,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     )
                 )
                 continue
+            run.company_linked += 1
             view.entity_type = qualified.entity_type
             view.entity_confidence = qualified.entity_confidence
             _record_entity_relations(run, qualified)
@@ -534,7 +561,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     if is_allowed_public_url(hit.url):
                         _ingest_page(run, deps, hit.url, hit.published_at, person_slot="verification")
         mentions = discover_mentions(run.observations, run.account_name)
-        mentions.extend(_mentions_from_metadata(run.evidence, mentions, run.account_name))
+        mentions.extend(_mentions_from_metadata(run.evidence, mentions, run.account_name, run.domain))
         priority_by_name = {item.name: item.priority_reason for item in prioritized}
         researched = set(deep_names[: run.deep_researched_count])
         people: list[PersonRecord] = []
@@ -819,7 +846,7 @@ def _record_entity_relations(run: RunModel, qualified: object) -> None:
                 published_at=None,
                 observed_at=run.observed_at,
                 confidence=relation.confidence,
-                lineage=["gliner", relation.relation],
+                lineage=["gliner", relation.relation, qualified.relationship or qualified.link_path],
                 topics=[],
                 supports_problem=False,
                 contradicts_redis=False,
@@ -993,7 +1020,7 @@ def _apply_role_bridge(record: PersonRecord, run: RunModel, observed_on: object)
 
 
 def _mentions_from_metadata(
-    evidence: list[Evidence], existing: Sequence[object], account_name: str
+    evidence: list[Evidence], existing: Sequence[object], account_name: str, domain: str
 ) -> list[Mention]:
     from app.person.qualify import qualify_person
 
@@ -1005,7 +1032,17 @@ def _mentions_from_metadata(
         name = item.value.strip()
         if not name or name in known:
             continue
-        if qualify_person(name, item.excerpt or name, account_name, source_url=item.source_url) is None:
+        if (
+            qualify_person(
+                name,
+                item.excerpt or name,
+                account_name,
+                source_url=item.source_url,
+                evidence_kind=item.evidence_type,
+                domain=domain,
+            )
+            is None
+        ):
             continue
         title = ""
         marker = " at "

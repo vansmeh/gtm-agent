@@ -87,6 +87,11 @@ def render_live_report(run: RunModel) -> str:
         f"role_resolutions: {run.role_resolutions}",
         f"role_failures: {run.role_failures}",
         f"candidates: {run.candidates_retained}",
+        f"PERSONS EXTRACTED: {run.persons_extracted}",
+        f"COMPANY-LINKED: {run.company_linked}",
+        f"REJECTED: {run.link_rejected}",
+        "REJECTION REASONS:",
+        *[f"- {reason}" for reason in run.link_rejection_reasons[:20]],
         f"role sources found: {run.role_results}",
         f"role resolutions: {run.role_resolutions}",
         "current roles: "

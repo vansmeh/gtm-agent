@@ -472,6 +472,10 @@ class RunModel(BaseModel):
     names_duplicated: int = 0
     names_rejected: int = 0
     candidates_retained: int = 0
+    persons_extracted: int = 0
+    company_linked: int = 0
+    link_rejected: int = 0
+    link_rejection_reasons: list[str] = Field(default_factory=list)
     candidates_prioritized: int = 0
     deep_researched_count: int = 0
     queries_executed: int = 0

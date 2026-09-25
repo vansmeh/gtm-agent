@@ -48,6 +48,9 @@ class QualifiedPerson:
     entity_type: str
     entity_confidence: float
     relations: tuple[EntityRelation, ...]
+    relationship: str = ""
+    link_path: str = ""
+    link_strength: str = ""
 
 
 def qualify_person(
@@ -57,27 +60,72 @@ def qualify_person(
     *,
     source_url: str = "",
     source_type: str = "untrusted_web",
+    domain: str = "",
+    evidence_kind: str = "",
 ) -> QualifiedPerson | None:
-    """Return a person only when the entity is a person in this company's context."""
-    if not name or not context:
-        return None
-    ruled = _ruler_label(name)
-    if ruled is not None and ruled != "PERSON":
-        return None
-    label, score = _gliner_label(name, context)
-    if label != "PERSON":
-        return None
-    if not _company_context(context, company):
-        return None
-    window = _window(context, name)
-    return QualifiedPerson(
-        name=name,
-        context=window,
+    """Return a person only when the entity links to this company. Not current employment."""
+    found, _reason = explain_qualification(
+        name,
+        context,
+        company,
         source_url=source_url,
         source_type=source_type,
-        entity_type="PERSON",
-        entity_confidence=score,
-        relations=tuple(_relations(name, window, company, score)),
+        domain=domain,
+        evidence_kind=evidence_kind,
+    )
+    return found
+
+
+def explain_qualification(
+    name: str,
+    context: str,
+    company: str,
+    *,
+    source_url: str = "",
+    source_type: str = "untrusted_web",
+    domain: str = "",
+    evidence_kind: str = "",
+) -> tuple[QualifiedPerson | None, str]:
+    """Return the qualified person, or a rejection reason."""
+    from app.person.company_link import link_person
+
+    if not name or not context:
+        return None, "empty name or context"
+    ruled = _ruler_label(name)
+    if ruled is not None and ruled != "PERSON":
+        return None, f"not a person ({ruled})"
+    label, score = _gliner_label(name, context)
+    if label != "PERSON":
+        return None, f"not a person ({label})"
+    link = link_person(
+        name,
+        context,
+        company,
+        source_url=source_url,
+        source_type=source_type,
+        domain=domain,
+        evidence_kind=evidence_kind,
+    )
+    if not link.associated:
+        return None, link.reason or "no company association"
+    window = _window(context, name)
+    relations = list(_relations(name, window, company, score))
+    if link.path and not any(item.relation == "works_at" for item in relations):
+        relations.append(EntityRelation(name, "works_at", company, score if link.strength == "strong" else 0.45))
+    return (
+        QualifiedPerson(
+            name=name,
+            context=window,
+            source_url=source_url,
+            source_type=source_type,
+            entity_type="PERSON",
+            entity_confidence=score,
+            relations=tuple(relations),
+            relationship=link.relationship,
+            link_path=link.path,
+            link_strength=link.strength,
+        ),
+        "",
     )
 
 
