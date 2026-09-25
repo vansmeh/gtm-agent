@@ -36,6 +36,8 @@ def extract_structured(html: str, url: str) -> list[StructuredFact]:
         text = " ".join(node.get_text(" ", strip=True).split())[:240]
         field = "team_member" if "member" in " ".join(node.get("class") or []) else "bio"
         facts.extend(_person_fact(url, "visible_block", field, text, 0.6))
+    for node in soup.select(".card-speaker, .card-roster-speaker"):
+        facts.extend(_speaker_card(node, url))
     for node in soup.select("[itemtype*='BreadcrumbList'] [itemprop='name']"):
         label = node.get_text(" ", strip=True)
         if label:
@@ -232,6 +234,34 @@ def _snippet_lineage(provider: str, query: str) -> list[str]:
     if query:
         lineage.append(f"query:{query}")
     return lineage
+
+
+def _speaker_card(node: object, url: str) -> list[StructuredFact]:
+    from bs4 import Tag
+
+    if not isinstance(node, Tag):
+        return []
+    heading = node.select_one(".card-heading")
+    role = node.select_one(".card-content")
+    badge = node.select_one(".card-badge")
+    name = " ".join(heading.get_text(" ", strip=True).split()) if heading else ""
+    title = " ".join(role.get_text(" ", strip=True).split()) if role else ""
+    company = " ".join(badge.get_text(" ", strip=True).split()) if badge else ""
+    if not name or classify_entity(name, f"{name}, {title}") in {"ORG", "PRODUCT", "TITLE", "DOCUMENT"}:
+        return []
+    raw = " ".join(part for part in (company, name, title) if part)
+    sentence = f"Speaker: {name}, {title} at {company}." if title and company else f"Speaker: {name}."
+    return [
+        StructuredFact(
+            evidence_type="speaker_metadata",
+            source_url=url,
+            field="speaker",
+            value=name,
+            raw_text=raw[:240],
+            confidence=0.7,
+            sentence=sentence,
+        )
+    ]
 
 
 def _clean_name(raw: str) -> str:

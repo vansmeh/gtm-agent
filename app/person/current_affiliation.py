@@ -86,7 +86,11 @@ def resolve_affiliation(
     elif any(_technical(item, functions) for item in old_company):
         result.technical_activity = "historical"
         result.activity_evidence_ids = [item.id for item in old_company[:1]]
-    snippets = [item for item in roles if item.source_type == "search_snippet"]
+    snippets = [
+        item
+        for item in roles
+        if item.source_type == "search_snippet" or item.evidence_type == "speaker_metadata"
+    ]
     dated_roles = [item for item in roles if item.source_type != "search_snippet" and item.published_at is not None]
     timeline = build_timeline(name, title, evidence, observed_on=observed_on)
     if timeline.current is not None and timeline.current.state == "current":

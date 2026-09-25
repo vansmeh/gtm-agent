@@ -7,6 +7,7 @@ from app.person.attribution import attributions_in, strengthens_expertise
 from app.person.current_affiliation import resolve_affiliation
 from app.research.structured import (
     dedupe_facts,
+    evidence_from_facts,
     extract_structured,
     mark_contradictions,
     snippet_role_facts,
@@ -32,6 +33,32 @@ def test_meta_author_and_json_ld_and_speaker() -> None:
     assert "author" in fields
     assert "speaker" in fields
     assert any("Ada Lovelace" in fact.sentence for fact in facts)
+
+
+def test_speaker_card_is_probable_role_not_ownership() -> None:
+    html = """
+    <html><body>
+      <div class="card card-speaker">
+        <div class="card-badge"><p>Northwind</p></div>
+        <div class="card-heading"><p>Ada Lovelace</p></div>
+        <div class="card-content"><p>Director of Platform Engineering</p></div>
+      </div>
+    </body></html>
+    """
+    facts = extract_structured(html, "https://northwind.example/speakers/")
+    assert any(fact.evidence_type == "speaker_metadata" and fact.value == "Ada Lovelace" for fact in facts)
+    evidence = evidence_from_facts(facts, observed_at=OBSERVED, observation_id="obs")
+    result = resolve_affiliation(
+        "Ada Lovelace",
+        "Director of Platform Engineering",
+        evidence,
+        account_name="Northwind",
+        domain="northwind.example",
+        functions=["platform"],
+        observed_on=OBSERVED.date(),
+    )
+    assert result.role_state == "probable_current"
+    assert result.ownership_level != "strong"
 
 
 def test_company_team_structured_data() -> None:
