@@ -42,5 +42,9 @@ module = [
   "google.oauth2.*",
   "google.auth",
   "google.auth.*",
+  "gliner",
+  "gliner.*",
+  "spacy",
+  "spacy.*",
 ]
 ignore_missing_imports = true

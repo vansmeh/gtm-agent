@@ -19,6 +19,8 @@ class CandidateView:
     published_at: date | None
     priority_reason: str = ""
     reject_reason: str = ""
+    entity_type: str = ""
+    entity_confidence: float = 0.0
 
 
 def profile_queries(name: str, account_name: str, functions: list[str]) -> list[str]:

@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import date
 
 from app.person.discovery import Mention
+from app.person.qualify import company_in_text
 
 _STALE_DAYS = 540
 
@@ -54,6 +55,7 @@ class Identity:
 
 
 def identities_from_mentions(mentions: list[Mention], company: str, *, observed_on: date) -> list[Identity]:
+    account = company
     grouped: dict[str, list[Mention]] = defaultdict(list)
     for mention in mentions:
         attributed = mention.excerpt.startswith(("Author:", "Speaker:"))
@@ -61,9 +63,12 @@ def identities_from_mentions(mentions: list[Mention], company: str, *, observed_
             continue
         if not mention.title and not attributed:
             continue
-        grouped[mention.name].append(mention)
+        stated = company_in_text(mention.excerpt) or account
+        grouped[f"{mention.name.lower()}|{stated.lower()}"].append(mention)
     built: list[Identity] = []
-    for name, rows in grouped.items():
+    for _key, rows in grouped.items():
+        name = rows[0].name
+        company = company_in_text(rows[0].excerpt) or account
         titles = list(dict.fromkeys(row.title for row in rows if row.title)) or [""]
         urls = list(dict.fromkeys(row.url for row in rows))
         dates = [row.published_at for row in rows if row.published_at is not None]

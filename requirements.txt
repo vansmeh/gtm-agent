@@ -6,6 +6,8 @@ sqlalchemy==2.0.36
 alembic==1.14.0
 httpx==0.28.1
 trafilatura==2.0.0
+gliner==0.2.29
+spacy==3.8.16
 beautifulsoup4==4.12.3
 lxml==5.3.0
 langgraph==0.2.60

@@ -402,8 +402,33 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     published_at=None,
                 )
             )
+        from app.person.qualify import qualify_person
+
         kept: list[CandidateView] = []
         for view in views:
+            qualified = qualify_person(
+                view.name,
+                view.excerpt,
+                run.account_name,
+                source_url=view.url,
+                source_type="untrusted_web",
+            )
+            if qualified is None:
+                view.reject_reason = "entity is not a person in company context"
+                run.person_traces.append(
+                    PersonSearchTrace(
+                        query="",
+                        candidate=view.name,
+                        source=view.url,
+                        finding=view.title,
+                        decision="reject",
+                        reason=view.reject_reason,
+                    )
+                )
+                continue
+            view.entity_type = qualified.entity_type
+            view.entity_confidence = qualified.entity_confidence
+            _record_entity_relations(run, qualified)
             reason = cheap_reject(
                 view,
                 account_name=run.account_name,
@@ -461,13 +486,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     if run.verification_pages_used >= run.verification_page_budget:
                         break
                     _ingest_page(run, deps, hit.url, hit.published_at, person_slot="verification")
-        from app.person.entity import classify_entity
-
-        people_first = [
-            view
-            for view in prioritized
-            if classify_entity(view.name, view.excerpt) == "PERSON"
-        ]
+        people_first = [view for view in prioritized if view.entity_type == "PERSON"]
         _run_role_bridge(run, deps, people_first[:5])
         for view in prioritized[:5]:
             if run.deep_queries_used >= run.deep_query_budget:
@@ -515,7 +534,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     if is_allowed_public_url(hit.url):
                         _ingest_page(run, deps, hit.url, hit.published_at, person_slot="verification")
         mentions = discover_mentions(run.observations, run.account_name)
-        mentions.extend(_mentions_from_metadata(run.evidence, mentions))
+        mentions.extend(_mentions_from_metadata(run.evidence, mentions, run.account_name))
         priority_by_name = {item.name: item.priority_reason for item in prioritized}
         researched = set(deep_names[: run.deep_researched_count])
         people: list[PersonRecord] = []
@@ -783,15 +802,43 @@ def _discovery_lineage(query: str, hits: Sequence[object], url: str) -> list[str
     return lineage
 
 
+def _record_entity_relations(run: RunModel, qualified: object) -> None:
+    from app.person.qualify import QualifiedPerson
+
+    if not isinstance(qualified, QualifiedPerson):
+        return
+    for relation in qualified.relations:
+        run.evidence.append(
+            Evidence(
+                id=str(uuid.uuid4()),
+                observation_id="entity",
+                excerpt=f"{qualified.context} [{relation.relation}: {relation.object}]",
+                source_url=qualified.source_url,
+                source_title=qualified.name,
+                source_type=qualified.source_type,
+                published_at=None,
+                observed_at=run.observed_at,
+                confidence=relation.confidence,
+                lineage=["gliner", relation.relation],
+                topics=[],
+                supports_problem=False,
+                contradicts_redis=False,
+                is_explicit_gap=False,
+                evidence_type="entity_relation",
+                field=relation.relation,
+                value=relation.object,
+                raw_text=qualified.context,
+            )
+        )
+
+
 def _run_role_bridge(run: RunModel, deps: PipelineDeps, candidates: Sequence[object]) -> None:
     from app.person.current_role_bridge import resolve_role_bridge, source_queries, source_rank
-    from app.person.entity import classify_entity
     from app.research.search import SearchHit
 
     for view in candidates:
         name = str(getattr(view, "name", ""))
-        excerpt = str(getattr(view, "excerpt", ""))
-        if classify_entity(name, excerpt) in {"ORG", "PRODUCT", "TITLE", "DOCUMENT"}:
+        if getattr(view, "entity_type", "") != "PERSON":
             continue
         queries = source_queries(name, run.account_name, run.domain)[: run.role_bridge_budget]
         discovered: list[SearchHit] = []
@@ -945,8 +992,10 @@ def _apply_role_bridge(record: PersonRecord, run: RunModel, observed_on: object)
         record.function_source = resolved.function_source
 
 
-def _mentions_from_metadata(evidence: list[Evidence], existing: Sequence[object]) -> list[Mention]:
-    from app.person.entity import classify_entity
+def _mentions_from_metadata(
+    evidence: list[Evidence], existing: Sequence[object], account_name: str
+) -> list[Mention]:
+    from app.person.qualify import qualify_person
 
     known = {getattr(item, "name", "") for item in existing}
     found: list[Mention] = []
@@ -954,7 +1003,9 @@ def _mentions_from_metadata(evidence: list[Evidence], existing: Sequence[object]
         if item.evidence_type not in {"author_metadata", "json_ld", "speaker_metadata"}:
             continue
         name = item.value.strip()
-        if not name or name in known or classify_entity(name, item.excerpt) in {"ORG", "PRODUCT", "TITLE", "DOCUMENT"}:
+        if not name or name in known:
+            continue
+        if qualify_person(name, item.excerpt or name, account_name, source_url=item.source_url) is None:
             continue
         title = ""
         marker = " at "
