@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     verification_page_budget: int = 3
     deep_query_budget: int = 10
     deep_page_budget: int = 6
+    role_bridge_budget: int = 10
     why_now_window_days: int = 180
     current_role_window_days: int = 365
     current_activity_window_days: int = 365

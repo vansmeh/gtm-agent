@@ -68,6 +68,14 @@ class StructuredFact(BaseModel):
     sentence: str = ""
 
 
+class RoleHistoryEntry(BaseModel):
+    title: str
+    company: str
+    source: str
+    role_date: date | None = None
+    confidence: float = 0.0
+
+
 class TechnicalSignal(BaseModel):
     id: str
     signal_type: str
@@ -155,6 +163,12 @@ class PersonRecord(BaseModel):
         "rejected",
     ] = "rejected"
     candidate_source_type: str = ""
+    current_employer: str = ""
+    role_history: list[RoleHistoryEntry] = Field(default_factory=list)
+    role_confidence: float = 0.0
+    role_as_of: date | None = None
+    role_source: str = ""
+    function_source: str = ""
     candidate_priority_reason: str = ""
     deep_researched: bool = False
     next_query: str = ""
@@ -425,6 +439,12 @@ class RunModel(BaseModel):
     verification_page_budget: int = 3
     deep_query_budget: int = 10
     deep_page_budget: int = 6
+    role_bridge_budget: int = 10
+    role_queries: int = 0
+    role_results: int = 0
+    role_hits: int = 0
+    role_resolutions: int = 0
+    role_failures: int = 0
     discovery_queries_used: int = 0
     discovery_pages_used: int = 0
     verification_queries_used: int = 0

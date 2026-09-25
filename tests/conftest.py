@@ -20,5 +20,6 @@ def isolated_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         "VERIFICATION_PAGE_BUDGET",
         "DEEP_QUERY_BUDGET",
         "DEEP_PAGE_BUDGET",
+        "ROLE_BRIDGE_BUDGET",
     ):
         monkeypatch.delenv(key, raising=False)

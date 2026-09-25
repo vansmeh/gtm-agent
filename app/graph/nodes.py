@@ -107,6 +107,7 @@ class PipelineDeps:
     verification_page_budget: int = 3
     deep_query_budget: int = 10
     deep_page_budget: int = 6
+    role_bridge_budget: int = 10
     search_provider_name: str = "mock"
 
 
@@ -148,6 +149,8 @@ def _ingest_page(
     if person_slot == "verification" and run.verification_pages_used >= run.verification_page_budget:
         return
     if person_slot == "deep" and run.deep_pages_used >= run.deep_page_budget:
+        return
+    if person_slot == "role" and run.role_queries >= run.role_bridge_budget * 5:
         return
     if person_slot is False and len(run.fetched_urls) >= run.max_pages:
         return
@@ -271,6 +274,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
         run.verification_query_budget = deps.verification_query_budget
         run.verification_page_budget = deps.verification_page_budget
         run.deep_query_budget = deps.deep_query_budget
+        run.role_bridge_budget = deps.role_bridge_budget
         run.deep_page_budget = deps.deep_page_budget
         queries = (
             person_discovery_queries(run.account_name, run.domain, function_label, signal_label)
@@ -456,6 +460,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
                     if run.verification_pages_used >= run.verification_page_budget:
                         break
                     _ingest_page(run, deps, hit.url, hit.published_at, person_slot="verification")
+        _run_role_bridge(run, deps, prioritized[:5])
         for view in prioritized[:5]:
             if run.deep_queries_used >= run.deep_query_budget:
                 run.person_traces.append(
@@ -564,6 +569,7 @@ def discover_people(deps: PipelineDeps) -> Callable[[GraphState], GraphState]:
             record.affiliation = affiliation.affiliation  # type: ignore[assignment]
             record.affiliation_evidence_ids = affiliation.affiliation_evidence_ids
             record.role_state = affiliation.role_state  # type: ignore[assignment]
+            _apply_role_bridge(record, run, observed_on)
             record.candidate_source_type = _candidate_source(identity.name, run.evidence)
             record.role_evidence_ids = affiliation.role_evidence_ids
             record.function_level = affiliation.function_level  # type: ignore[assignment]
@@ -766,6 +772,104 @@ def _discovery_lineage(query: str, hits: Sequence[object], url: str) -> list[str
     if provider:
         lineage.append(f"provider:{provider}")
     return lineage
+
+
+def _run_role_bridge(run: RunModel, deps: PipelineDeps, candidates: Sequence[object]) -> None:
+    from app.person.current_role_bridge import resolve_role_bridge, role_queries
+    from app.research.search import SearchHit
+    from app.research.structured import snippet_role_facts
+
+    for view in candidates:
+        name = str(getattr(view, "name", ""))
+        queries = role_queries(name, run.account_name)[: run.role_bridge_budget]
+        before = len(run.evidence)
+        for query in queries:
+            hits = _bridge_search(deps, query, limit=3)
+            typed = [hit for hit in hits if isinstance(hit, SearchHit)]
+            run.role_queries += 1
+            run.role_results += len(typed)
+            _note_search(run, query, typed)
+            for hit in typed:
+                for fact in snippet_role_facts(
+                    title=hit.title,
+                    snippet=hit.snippet,
+                    url=hit.url,
+                    account_name=run.account_name,
+                    observed_at=run.observed_at,
+                    provider=hit.provider,
+                    query=query,
+                ):
+                    if any(item.id == fact.id for item in run.evidence):
+                        continue
+                    if name not in fact.excerpt:
+                        continue
+                    run.evidence.append(fact)
+                    run.role_hits += 1
+                if "linkedin.com" in hit.url or not is_allowed_public_url(hit.url):
+                    continue
+                if hit.url in run.fetched_urls:
+                    continue
+                _ingest_page(run, deps, hit.url, hit.published_at, person_slot="role")
+        resolved = resolve_role_bridge(
+            name,
+            run.evidence,
+            account_name=run.account_name,
+            observed_on=run.observed_at.date(),
+        )
+        if resolved.role_state in {"current", "probable_current"} or len(run.evidence) > before:
+            run.role_resolutions += 1 if resolved.role_state in {"current", "probable_current"} else 0
+        if resolved.role_state not in {"current", "probable_current"}:
+            run.role_failures += 1
+        run.person_traces.append(
+            PersonSearchTrace(
+                query=queries[0] if queries else "",
+                candidate=name,
+                source=resolved.source,
+                finding=f"{resolved.role_state}: {resolved.title or 'unknown'}",
+                decision="accept" if resolved.role_state in {"current", "probable_current"} else "reject",
+                reason="candidate role bridge; LinkedIn pages are not fetched",
+            )
+        )
+
+
+def _bridge_search(deps: PipelineDeps, query: str, *, limit: int) -> list[object]:
+    provider = deps.search
+    calls = getattr(provider, "calls", None)
+    hits: list[object] = list(provider.search(query, limit=limit))
+    if isinstance(calls, int):
+        provider.calls = calls  # type: ignore[attr-defined]
+    return hits
+
+
+def _apply_role_bridge(record: PersonRecord, run: RunModel, observed_on: object) -> None:
+    from datetime import date
+
+    from app.person.current_role_bridge import resolve_role_bridge
+
+    if not isinstance(observed_on, date):
+        return
+    resolved = resolve_role_bridge(
+        record.name,
+        run.evidence,
+        account_name=run.account_name,
+        observed_on=observed_on,
+    )
+    record.role_history = resolved.history
+    record.current_employer = resolved.employer or record.company or run.account_name
+    record.role_confidence = resolved.confidence
+    record.role_as_of = resolved.as_of
+    record.role_source = resolved.source
+    if resolved.role_state == "historical" and resolved.employer.lower() != run.account_name.lower():
+        record.role_state = "historical"
+        record.role_evidence_ids = resolved.evidence_ids or record.role_evidence_ids
+    elif resolved.role_state in {"current", "probable_current"} and record.role_state in {"unknown", "historical"}:
+        record.role_state = resolved.role_state  # type: ignore[assignment]
+        record.title = resolved.title or record.title
+        record.role_evidence_ids = resolved.evidence_ids or record.role_evidence_ids
+    if resolved.function_level == "strong" and record.function_level in {"unknown", "weak"}:
+        record.function_level = "strong"
+        record.function_guess = resolved.function
+        record.function_source = resolved.function_source
 
 
 def _mentions_from_metadata(evidence: list[Evidence], existing: Sequence[object]) -> list[Mention]:

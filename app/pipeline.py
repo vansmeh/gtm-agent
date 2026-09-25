@@ -70,6 +70,7 @@ def execute_run(
         verification_page_budget=settings.verification_page_budget,
         deep_query_budget=settings.deep_query_budget,
         deep_page_budget=settings.deep_page_budget,
+        role_bridge_budget=settings.role_bridge_budget,
         search_mode=mode,  # type: ignore[arg-type]
         search_endpoint=str(getattr(search, "endpoint", "")),
     )
@@ -84,6 +85,7 @@ def execute_run(
         observed_at=moment,
         max_searches_per_cycle=settings.max_searches_per_cycle,
         person_query_budget=settings.person_query_budget,
+        role_bridge_budget=settings.role_bridge_budget,
         search_provider_name=settings.search_provider,
     )
     graph = build_graph(deps)
